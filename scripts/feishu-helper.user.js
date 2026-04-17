@@ -90,8 +90,8 @@
   }
 
   function getDocToken() {
-    var match = location.pathname.match(/\/docx\/([A-Za-z0-9]+)/);
-    return match ? match[1] : null;
+    var match = location.pathname.match(/\/(docx|wiki|doc|sheet|slides|base)\/([A-Za-z0-9]+)/);
+    return match ? match[2] : null;
   }
 
   function getCsrfToken() {
@@ -288,8 +288,25 @@
   }
 
   document.addEventListener('DOMContentLoaded', function () {
-    setTimeout(createFloatingButton, 2000);
+    function tryCreateButton() {
+      if (!document.getElementById('__feishu_toolbar__') && document.body) {
+        createFloatingButton();
+      }
+    }
+    setTimeout(tryCreateButton, 2000);
+    setTimeout(tryCreateButton, 5000);
+    setTimeout(tryCreateButton, 10000);
   });
+
+  var lastUrl = location.href;
+  setInterval(function () {
+    if (location.href !== lastUrl) {
+      lastUrl = location.href;
+      var existing = document.getElementById('__feishu_toolbar__');
+      if (existing) existing.remove();
+      setTimeout(createFloatingButton, 1500);
+    }
+  }, 1000);
 
   function extractImages() {
     var images = [];
