@@ -157,7 +157,7 @@
       if (btn) btn.textContent = '创建副本';
 
       var baseUrl = location.origin;
-      var newDocUrl = baseUrl + '/docx/new';
+      var newDocUrl = baseUrl + '/drive/home/?create=docx';
 
       var w = window.open(newDocUrl, '_blank');
 
