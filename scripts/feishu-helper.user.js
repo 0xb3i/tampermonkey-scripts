@@ -125,6 +125,50 @@
     };
   }
 
+  function scrollAndExtract(callback) {
+    var scrollEl = document.querySelector('[class*="scroll-container"]') ||
+                   document.querySelector('[class*="doc-scroll"]') ||
+                   document.querySelector('.wiki-content') ||
+                   document.scrollingElement ||
+                   document.documentElement;
+
+    var btn = document.getElementById('__feishu_duplicate_btn__');
+    if (btn) btn.textContent = '滚动加载中...';
+
+    var scrollHeight = scrollEl.scrollHeight;
+    var currentPos = 0;
+    var scrollStep = 800;
+    var stableCount = 0;
+
+    function doScroll() {
+      currentPos += scrollStep;
+      scrollEl.scrollTo({ top: currentPos, behavior: 'auto' });
+      window.scrollTo(0, currentPos);
+
+      var newHeight = scrollEl.scrollHeight;
+      if (newHeight > scrollHeight) {
+        scrollHeight = newHeight;
+        stableCount = 0;
+      } else {
+        stableCount++;
+      }
+
+      if (currentPos < scrollHeight - window.innerHeight && stableCount < 5) {
+        setTimeout(doScroll, 100);
+      } else {
+        scrollEl.scrollTo({ top: 0, behavior: 'auto' });
+        window.scrollTo(0, 0);
+        setTimeout(function () {
+          var content = getDocContent();
+          if (btn) btn.textContent = '创建副本';
+          callback(content);
+        }, 500);
+      }
+    }
+
+    doScroll();
+  }
+
   function getPendingPaste() {
     try {
       var data = localStorage.getItem('__feishu_pending_paste__');
@@ -150,31 +194,27 @@
       return;
     }
 
-    var btn = document.getElementById('__feishu_duplicate_btn__');
-    if (btn) btn.textContent = '提取中...';
+    scrollAndExtract(function (content) {
+      if (!content) {
+        alert('无法提取文档内容');
+        return;
+      }
 
-    var content = getDocContent();
-    if (!content) {
-      if (btn) btn.textContent = '创建副本';
-      alert('无法提取文档内容');
-      return;
-    }
+      var title = document.querySelector('title');
+      var docTitle = title ? title.textContent.replace(/ - 飞书云文档$/, '').replace(/ - Lark$/, '') : '副本';
 
-    var title = document.querySelector('title');
-    var docTitle = title ? title.textContent.replace(/ - 飞书云文档$/, '').replace(/ - Lark$/, '') : '副本';
+      setPendingPaste({ html: content.html, text: content.text, title: docTitle });
 
-    setPendingPaste({ html: content.html, text: content.text, title: docTitle });
-    if (btn) btn.textContent = '已提取 ✓';
-
-    showNotice(
-      '✅',
-      '文档内容已提取',
-      '接下来请：<br>' +
-      '1. 手动新建一个飞书文档<br>' +
-      '2. 打开空白文档<br>' +
-      '3. 点击右下角绿色的 <b>粘贴副本</b> 按钮<br><br>' +
-      '内容会在新文档页面写入剪贴板，然后按 Cmd+V 粘贴即可'
-    );
+      showNotice(
+        '✅',
+        '文档内容已提取',
+        '接下来请：<br>' +
+        '1. 手动新建一个飞书文档<br>' +
+        '2. 打开空白文档<br>' +
+        '3. 点击右下角绿色的 <b>粘贴副本</b> 按钮<br><br>' +
+        '内容会在新文档页面写入剪贴板，然后按 Cmd+V 粘贴即可'
+      );
+    });
   }
 
   function pasteIntoDoc() {
