@@ -72,7 +72,7 @@
 
 **2. 批量提取图片**
 
-快捷键 `Ctrl+Shift+E`（Mac: `Cmd+Shift+E`）打开图片提取面板：
+快捷键 `Cmd+Shift+I` 打开图片提取面板：
 
 - 自动扫描页面中所有 `<img>`、`background-image`、SVG `<image>` 元素
 - 弹出面板展示所有图片缩略图和尺寸

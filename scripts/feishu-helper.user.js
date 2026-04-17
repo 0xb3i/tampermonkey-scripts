@@ -177,7 +177,7 @@
   }
 
   document.addEventListener('keydown', function (e) {
-    if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key.toLowerCase() === 'e') {
+    if (e.metaKey && e.shiftKey && e.key.toLowerCase() === 'i') {
       e.preventDefault();
       e.stopImmediatePropagation();
       var images = extractImages();
