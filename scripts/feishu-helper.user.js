@@ -101,6 +101,7 @@
 
   function getDocContent() {
     var contentEl = document.querySelector('[data-content-editable-root="true"]') ||
+                    document.querySelector('.page-block.root-block') ||
                     document.querySelector('.doc-content') ||
                     document.querySelector('.docx-container') ||
                     document.querySelector('[class*="doc-content"]') ||
@@ -190,7 +191,8 @@
   }
 
   function scrollAndExtract(callback) {
-    var scrollEl = document.querySelector('[class*="scroll-container"]') ||
+    var scrollEl = document.querySelector('.bear-web-x-container') ||
+                   document.querySelector('[class*="scroll-container"]') ||
                    document.querySelector('[class*="doc-scroll"]') ||
                    document.querySelector('.wiki-content') ||
                    document.scrollingElement ||
