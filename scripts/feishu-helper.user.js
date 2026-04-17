@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         飞书文档助手
 // @namespace    https://github.com/tampermonkey-scripts
-// @version      3.0.0
-// @description  解除飞书文档复制限制，批量提取文档图片，创建文档副本（含LaTeX公式）
+// @version      4.0.0
+// @description  飞书文档完整复制、图片提取、文档副本（含LaTeX公式）
 // @author       You
 // @match        https://*.feishu.cn/*
 // @match        https://*.larksuite.com/*
@@ -13,77 +13,6 @@
 
 (function () {
   'use strict';
-
-  var EVENTS = ['copy', 'cut', 'contextmenu', 'keydown', 'keyup'];
-  var STYLE_CSS = '*{user-select:text!important;-webkit-user-select:text!important}';
-
-  var installed = new WeakSet();
-
-  function install(win) {
-    if (installed.has(win)) return;
-    installed.add(win);
-
-    try {
-      var doc = win.document;
-
-      if (!doc.getElementById('__feishu_freecopy_style__')) {
-        var s = doc.createElement('style');
-        s.id = '__feishu_freecopy_style__';
-        s.textContent = STYLE_CSS;
-        (doc.head || doc.documentElement).appendChild(s);
-      }
-
-      var handler = function (e) {
-        if (e.type === 'keydown' || e.type === 'keyup') {
-          var k = (e.key || '').toLowerCase();
-          var ctrlLike = e.ctrlKey || e.metaKey;
-          if (!(ctrlLike && (k === 'c' || k === 'a' || k === 'x' || k === 'v'))) return;
-        }
-        e.stopImmediatePropagation();
-      };
-
-      [win, doc, doc.documentElement, doc.body].forEach(function (t) {
-        if (!t || !t.addEventListener) return;
-        EVENTS.forEach(function (ev) {
-          t.addEventListener(ev, handler, true);
-        });
-      });
-
-      removeOverlays(win);
-    } catch (_) {}
-  }
-
-  function removeOverlays(win) {
-    try {
-      var doc = win.document;
-      doc.querySelectorAll('*').forEach(function (el) {
-        var cs = win.getComputedStyle(el);
-        if ((cs.position === 'fixed' || cs.position === 'absolute') && parseFloat(cs.opacity) === 0 && cs.pointerEvents !== 'none') {
-          el.style.display = 'none';
-        }
-      });
-    } catch (_) {}
-  }
-
-  function startFreeCopy() {
-    install(window);
-
-    var t0 = performance.now();
-    (function loop() {
-      try {
-        window.document.querySelectorAll('iframe').forEach(function (f) {
-          try { if (f.contentWindow && f.contentDocument) install(f.contentWindow); } catch (_) {}
-        });
-      } catch (_) {}
-      if (performance.now() - t0 < 15000) requestAnimationFrame(loop);
-    })();
-  }
-
-  if (document.body) {
-    startFreeCopy();
-  } else {
-    document.addEventListener('DOMContentLoaded', startFreeCopy);
-  }
 
   function getDocToken() {
     var match = location.pathname.match(/\/(docx|wiki|doc|sheet|slides|base)\/([A-Za-z0-9]+)/);
@@ -217,11 +146,6 @@
   function getEmoji(emojiId) {
     return EMOJI_MAP[emojiId] || '';
   }
-
-  var CONTAINER_TYPES = {
-    'callout': true, 'quote_container': true, 'grid': true,
-    'grid_column': true, 'table': true, 'table_cell': true,
-  };
 
   function blockToHtml(snap, block, childHtmlArr) {
     var type = snap.type;
@@ -543,102 +467,186 @@
     };
   }
 
+  var DB_NAME = '__feishu_helper_db__';
+  var DB_STORE = 'paste';
+  var DB_KEY = 'pending';
+
+  function openDB() {
+    return new Promise(function (resolve, reject) {
+      var req = indexedDB.open(DB_NAME, 1);
+      req.onupgradeneeded = function () {
+        req.result.createObjectStore(DB_STORE);
+      };
+      req.onsuccess = function () { resolve(req.result); };
+      req.onerror = function () { reject(req.error); };
+    });
+  }
+
   function getPendingPaste() {
-    try {
-      var data = localStorage.getItem('__feishu_pending_paste__');
-      if (!data) return null;
-      var parsed = JSON.parse(data);
-      if (parsed && parsed.ts && Date.now() - parsed.ts < 3600000) return parsed;
-      localStorage.removeItem('__feishu_pending_paste__');
-      return null;
-    } catch (_) { return null; }
+    return openDB().then(function (db) {
+      return new Promise(function (resolve) {
+        var tx = db.transaction(DB_STORE, 'readonly');
+        var req = tx.objectStore(DB_STORE).get(DB_KEY);
+        req.onsuccess = function () {
+          var data = req.result;
+          if (data && data.ts && Date.now() - data.ts < 3600000) {
+            resolve(data);
+          } else {
+            if (data) {
+              var dtx = db.transaction(DB_STORE, 'readwrite');
+              dtx.objectStore(DB_STORE).delete(DB_KEY);
+            }
+            resolve(null);
+          }
+        };
+        req.onerror = function () { resolve(null); };
+      });
+    }).catch(function () { return null; });
   }
 
   function setPendingPaste(data) {
-    try {
-      data.ts = Date.now();
-      localStorage.setItem('__feishu_pending_paste__', JSON.stringify(data));
-    } catch (_) {}
+    return openDB().then(function (db) {
+      return new Promise(function (resolve, reject) {
+        data.ts = Date.now();
+        var tx = db.transaction(DB_STORE, 'readwrite');
+        tx.objectStore(DB_STORE).put(data, DB_KEY);
+        tx.oncomplete = function () { resolve(); };
+        tx.onerror = function () { reject(tx.error); };
+      });
+    }).catch(function () {});
+  }
+
+  function blobToBase64(blob) {
+    return new Promise(function (resolve) {
+      var reader = new FileReader();
+      reader.onloadend = function () { resolve(reader.result); };
+      reader.readAsDataURL(blob);
+    });
+  }
+
+  function fetchImageAsBase64(url) {
+    return fetch(url, { credentials: 'include' })
+      .then(function (r) {
+        if (!r.ok) return null;
+        return r.blob();
+      })
+      .then(function (blob) {
+        if (!blob) return null;
+        return blobToBase64(blob);
+      })
+      .catch(function () { return null; });
+  }
+
+  function convertImagesToBase64(html) {
+    var imgUrls = [];
+    var urlRegex = /src="(https?:\/\/[^"]+\/space\/api\/box\/stream\/download\/preview\/[^"]+)"/g;
+    var match;
+    while ((match = urlRegex.exec(html)) !== null) {
+      imgUrls.push({ url: match[1], full: match[0] });
+    }
+
+    if (imgUrls.length === 0) return Promise.resolve(html);
+
+    var done = 0;
+    var total = imgUrls.length;
+
+    showToast('📷 转换图片中 0/' + total);
+
+    var promises = imgUrls.map(function (item) {
+      return function () {
+        return fetchImageAsBase64(item.url).then(function (base64) {
+          done++;
+          showToast('📷 转换图片中 ' + done + '/' + total);
+          if (base64) {
+            html = html.replace(item.full, 'src="' + base64 + '"');
+          }
+        });
+      };
+    });
+
+    var batchSize = 5;
+    var chain = Promise.resolve();
+    for (var i = 0; i < promises.length; i += batchSize) {
+      (function (batch) {
+        chain = chain.then(function () {
+          return Promise.all(batch.map(function (fn) { return fn(); }));
+        });
+      })(promises.slice(i, i + batchSize));
+    }
+
+    return chain.then(function () {
+      return html;
+    });
+  }
+
+  function showToast(msg, duration) {
+    var existing = document.getElementById('__feishu_toast__');
+    if (existing) existing.remove();
+
+    var toast = document.createElement('div');
+    toast.id = '__feishu_toast__';
+    toast.style.cssText = 'position:fixed;top:60px;left:50%;transform:translateX(-50%);background:rgba(0,0,0,0.75);color:#fff;padding:10px 20px;border-radius:8px;font-size:14px;z-index:9999999;pointer-events:none;transition:opacity 0.3s;white-space:nowrap;';
+    toast.textContent = msg;
+    document.body.appendChild(toast);
+
+    if (duration !== 0) {
+      setTimeout(function () {
+        toast.style.opacity = '0';
+        setTimeout(function () { toast.remove(); }, 300);
+      }, duration || 2000);
+    }
   }
 
   function duplicateDocument() {
     var token = getDocToken();
     if (!token) {
-      alert('无法识别当前文档，请确保在飞书文档页面使用此功能');
+      showToast('⚠️ 无法识别当前文档');
       return;
     }
 
-    var content = extractFullDoc();
-    if (!content) {
-      alert('无法提取文档内容，请确保文档已完全加载');
-      return;
-    }
+    showToast('⏳ 提取文档中...', 0);
 
-    var title = document.querySelector('title');
-    var docTitle = title ? title.textContent.replace(/ - 飞书云文档$/, '').replace(/ - Lark$/, '') : '副本';
+    setTimeout(function () {
+      var content = extractFullDoc();
+      if (!content) {
+        showToast('⚠️ 提取失败，请确保文档已加载');
+        return;
+      }
 
-    setPendingPaste({ html: content.html, text: content.text, title: docTitle });
+      var title = document.querySelector('title');
+      var docTitle = title ? title.textContent.replace(/ - 飞书云文档$/, '').replace(/ - Lark$/, '') : '副本';
 
-    showNotice(
-      '✅',
-      '文档内容已提取',
-      '共 ' + content.blockCount + ' 个内容块，其中 ' + content.equationCount + ' 个含公式<br><br>' +
-      '接下来请：<br>' +
-      '1. 手动新建一个飞书文档<br>' +
-      '2. 打开空白文档<br>' +
-      '3. 按 <kbd style="background:#f0f0f0;padding:2px 6px;border-radius:4px;border:1px solid #ccc;">Cmd+Shift+P</kbd> 粘贴副本<br><br>' +
-      '内容会写入剪贴板，然后按 Cmd+V 粘贴即可'
-    );
+      convertImagesToBase64(content.html).then(function (htmlWithImages) {
+        content.html = htmlWithImages;
+        return setPendingPaste({ html: content.html, text: content.text, title: docTitle });
+      }).then(function () {
+        var imgCount = (content.html.match(/data:image/g) || []).length;
+        showToast('✅ 已提取 ' + content.blockCount + ' 块 · ' + content.equationCount + ' 公式 · ' + imgCount + ' 图片', 3000);
+      });
+    }, 50);
   }
 
   function pasteIntoDoc() {
-    var pendingPaste = getPendingPaste();
-    if (!pendingPaste) {
-      alert('请先在源文档页面点击"创建副本"');
-      return;
-    }
+    getPendingPaste().then(function (pendingPaste) {
+      if (!pendingPaste) {
+        showToast('⚠️ 请先在源文档按 Cmd+Shift+D 提取');
+        return;
+      }
 
-    var content = pendingPaste;
-    var html = '<!DOCTYPE html><html><head><meta charset="utf-8"><title>' + content.title + '</title></head><body>' + content.html + '</body></html>';
+      var content = pendingPaste;
+      var html = '<!DOCTYPE html><html><head><meta charset="utf-8"><title>' + content.title + '</title></head><body>' + content.html + '</body></html>';
 
-    var blob = new Blob([html], { type: 'text/html' });
-    var clipboardItem = new ClipboardItem({
-      'text/html': blob,
-      'text/plain': new Blob([content.text], { type: 'text/plain' }),
-    });
+      var blob = new Blob([html], { type: 'text/html' });
+      var clipboardItem = new ClipboardItem({
+        'text/html': blob,
+        'text/plain': new Blob([content.text], { type: 'text/plain' }),
+      });
 
-    navigator.clipboard.write([clipboardItem]).then(function () {
-      showNotice(
-        '📋',
-        '内容已写入剪贴板',
-        '请按 <kbd style="background:#f0f0f0;padding:2px 6px;border-radius:4px;border:1px solid #ccc;">Cmd+V</kbd> 粘贴到文档中'
-      );
-    }).catch(function () {
-      showNotice(
-        '⚠️',
-        '写入剪贴板失败',
-        '请手动复制：全选下方内容 → Cmd+C → 切换到文档 → Cmd+V'
-      );
-    });
-  }
-
-  function showNotice(icon, title, message) {
-    var existing = document.getElementById('__feishu_notice__');
-    if (existing) existing.remove();
-
-    var notice = document.createElement('div');
-    notice.id = '__feishu_notice__';
-    notice.style.cssText = 'position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);background:#fff;padding:24px 32px;border-radius:12px;box-shadow:0 4px 24px rgba(0,0,0,0.2);z-index:9999999;text-align:center;max-width:420px;';
-    notice.innerHTML =
-      '<div style="font-size:24px;margin-bottom:8px;">' + icon + '</div>' +
-      '<div style="font-size:16px;font-weight:bold;margin-bottom:8px;">' + title + '</div>' +
-      '<div style="font-size:14px;color:#666;margin-bottom:16px;text-align:left;line-height:1.8;">' + message + '</div>' +
-      '<button id="__feishu_notice_close__" style="background:#3370ff;color:#fff;border:none;padding:8px 24px;border-radius:6px;cursor:pointer;font-size:14px;">知道了</button>';
-    document.body.appendChild(notice);
-
-    document.getElementById('__feishu_notice_close__').addEventListener('click', function (e) {
-      e.stopPropagation();
-      notice.remove();
+      navigator.clipboard.write([clipboardItem]).then(function () {
+        showToast('📋 已写入剪贴板，按 Cmd+V 粘贴', 3000);
+      }).catch(function () {
+        showToast('⚠️ 写入剪贴板失败', 3000);
+      });
     });
   }
 
@@ -686,7 +694,7 @@
       '<div style="position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.6);z-index:999999;display:flex;align-items:center;justify-content:center;">' +
         '<div style="background:#fff;border-radius:12px;padding:24px;max-width:80vw;max-height:80vh;overflow:auto;position:relative;">' +
           '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;">' +
-            '<h3 style="margin:0;font-size:18px;">飞书文档图片提取 (' + images.length + ' 张)</h3>' +
+            '<h3 style="margin:0;font-size:18px;">图片提取 (' + images.length + ' 张)</h3>' +
             '<div>' +
               '<button id="__feishu_download_all__" style="background:#3370ff;color:#fff;border:none;padding:8px 16px;border-radius:6px;cursor:pointer;margin-right:8px;">全部下载</button>' +
               '<button id="__feishu_close_panel__" style="background:#f5f5f5;border:none;padding:8px 16px;border-radius:6px;cursor:pointer;">关闭</button>' +
@@ -746,14 +754,13 @@
       e.stopImmediatePropagation();
       var images = extractImages();
       if (images.length === 0) {
-        alert('当前页面未找到图片');
+        showToast('当前页面未找到图片');
       } else {
         createImagePanel(images);
       }
     }
   }, true);
 
-  window.__feishuExtractImages = extractImages;
-  window.__feishuDuplicateDoc = duplicateDocument;
   window.__feishuExtractFullDoc = extractFullDoc;
+  window.__feishuDuplicateDoc = duplicateDocument;
 })();
