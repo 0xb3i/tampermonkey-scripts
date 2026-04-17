@@ -125,7 +125,23 @@
     };
   }
 
-  var pendingPaste = null;
+  function getPendingPaste() {
+    try {
+      var data = localStorage.getItem('__feishu_pending_paste__');
+      if (!data) return null;
+      var parsed = JSON.parse(data);
+      if (parsed && parsed.ts && Date.now() - parsed.ts < 3600000) return parsed;
+      localStorage.removeItem('__feishu_pending_paste__');
+      return null;
+    } catch (_) { return null; }
+  }
+
+  function setPendingPaste(data) {
+    try {
+      data.ts = Date.now();
+      localStorage.setItem('__feishu_pending_paste__', JSON.stringify(data));
+    } catch (_) {}
+  }
 
   function duplicateDocument() {
     var token = getDocToken();
@@ -147,7 +163,7 @@
     var title = document.querySelector('title');
     var docTitle = title ? title.textContent.replace(/ - 飞书云文档$/, '').replace(/ - Lark$/, '') : '副本';
 
-    pendingPaste = { html: content.html, text: content.text, title: docTitle };
+    setPendingPaste({ html: content.html, text: content.text, title: docTitle });
     if (btn) btn.textContent = '已提取 ✓';
 
     showNotice(
@@ -162,6 +178,7 @@
   }
 
   function pasteIntoDoc() {
+    var pendingPaste = getPendingPaste();
     if (!pendingPaste) {
       alert('请先在源文档页面点击"创建副本"');
       return;
@@ -234,7 +251,7 @@
     container.id = '__feishu_toolbar__';
     container.style.cssText = 'position:fixed;bottom:24px;right:24px;z-index:999998;display:flex;flex-direction:column;gap:8px;';
 
-    if (pendingPaste) {
+    if (getPendingPaste()) {
       var pasteBtn = document.createElement('button');
       pasteBtn.id = '__feishu_paste_btn__';
       pasteBtn.textContent = '粘贴副本';
