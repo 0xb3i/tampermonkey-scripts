@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         飞书文档助手
 // @namespace    https://github.com/tampermonkey-scripts
-// @version      4.0.0
+// @version      4.1.0
 // @description  飞书文档完整复制、图片提取、文档副本（含LaTeX公式）
 // @author       You
 // @match        https://*.feishu.cn/*
@@ -794,12 +794,11 @@
     });
 
     document.querySelectorAll('[style*="background-image"]').forEach(function (el) {
-      var style = el.style.backgroundImage || '';
-      var match = style.match(/url\(["']?([^"')]+)["']?\)/);
-      if (match && match[1] && !seen.has(match[1])) {
-        seen.add(match[1]);
+      var bgUrl = extractUrlFromBackgroundImage(el.style.backgroundImage || '');
+      if (bgUrl && !seen.has(bgUrl)) {
+        seen.add(bgUrl);
         images.push({
-          src: match[1],
+          src: bgUrl,
           alt: '',
           width: el.offsetWidth,
           height: el.offsetHeight,
@@ -873,20 +872,138 @@
         alt: img.alt || '',
         width: img.naturalWidth || img.width || 0,
         height: img.naturalHeight || img.height || 0,
+        element: img,
+        sourceType: 'img',
       };
     }
 
-    var el = target.closest && target.closest('[style*="background-image"]');
-    if (!el) return null;
-    var bg = getComputedStyle(el).backgroundImage || '';
-    var match = bg.match(/url\(["']?([^"')]+)["']?\)/);
-    if (!match || !match[1]) return null;
+    var el = target;
+    var bgUrl = '';
+    while (el && el !== document.documentElement) {
+      if (el.nodeType === 1) {
+        var bg = getComputedStyle(el).backgroundImage || '';
+        bgUrl = extractUrlFromBackgroundImage(bg);
+        if (bgUrl) break;
+      }
+      el = el.parentElement;
+    }
+    if (!el || !bgUrl) return null;
     return {
-      src: match[1],
+      src: bgUrl,
       alt: '',
       width: el.offsetWidth || 0,
       height: el.offsetHeight || 0,
+      element: el,
+      sourceType: 'background',
     };
+  }
+
+  function extractUrlFromBackgroundImage(backgroundImage) {
+    if (!backgroundImage) return '';
+    var urlIndex = backgroundImage.indexOf('url(');
+    if (urlIndex === -1) return '';
+
+    var remainder = backgroundImage.slice(urlIndex + 4).trim();
+    if (!remainder) return '';
+
+    var quote = remainder[0];
+    if (quote === '"' || quote === '\'') {
+      var quotedEnd = remainder.indexOf(quote, 1);
+      return quotedEnd > 0 ? remainder.slice(1, quotedEnd) : '';
+    }
+
+    var closeIndex = remainder.indexOf(')');
+    return closeIndex > -1 ? remainder.slice(0, closeIndex).trim() : '';
+  }
+
+  function isContextMenuGesture(e) {
+    return !!e && (e.button === 2 || (e.button === 0 && e.ctrlKey));
+  }
+
+  var nativeImageMenuContext = null;
+  var nativeImageMenuProxy = null;
+  var nativeImageMenuCleanupTimer = 0;
+
+  function cleanupNativeImageMenuBypass() {
+    nativeImageMenuContext = null;
+    if (nativeImageMenuCleanupTimer) {
+      clearTimeout(nativeImageMenuCleanupTimer);
+      nativeImageMenuCleanupTimer = 0;
+    }
+    if (nativeImageMenuProxy) {
+      nativeImageMenuProxy.remove();
+      nativeImageMenuProxy = null;
+    }
+  }
+
+  function scheduleNativeImageMenuCleanup(delay) {
+    if (nativeImageMenuCleanupTimer) {
+      clearTimeout(nativeImageMenuCleanupTimer);
+    }
+    nativeImageMenuCleanupTimer = setTimeout(function () {
+      cleanupNativeImageMenuBypass();
+    }, delay || 2200);
+  }
+
+  function ensureNativeImageMenuProxy(imageInfo) {
+    if (!imageInfo || imageInfo.sourceType !== 'background' || !imageInfo.element) {
+      return true;
+    }
+
+    var rect = imageInfo.element.getBoundingClientRect();
+    if (!rect.width || !rect.height) return false;
+
+    if (!nativeImageMenuProxy) {
+      nativeImageMenuProxy = document.createElement('img');
+      nativeImageMenuProxy.id = '__feishu_native_image_proxy__';
+      nativeImageMenuProxy.setAttribute('aria-hidden', 'true');
+      nativeImageMenuProxy.style.cssText = [
+        'position:fixed',
+        'z-index:2147483646',
+        'pointer-events:auto',
+        'opacity:0.01',
+        'user-select:none',
+        '-webkit-user-drag:none',
+        'margin:0',
+        'padding:0',
+        'border:none',
+        'background:transparent',
+      ].join(';');
+    }
+
+    var computedStyle = getComputedStyle(imageInfo.element);
+    nativeImageMenuProxy.src = imageInfo.src;
+    nativeImageMenuProxy.alt = imageInfo.alt || '';
+    nativeImageMenuProxy.style.left = Math.round(rect.left) + 'px';
+    nativeImageMenuProxy.style.top = Math.round(rect.top) + 'px';
+    nativeImageMenuProxy.style.width = Math.max(1, Math.round(rect.width)) + 'px';
+    nativeImageMenuProxy.style.height = Math.max(1, Math.round(rect.height)) + 'px';
+    nativeImageMenuProxy.style.borderRadius = computedStyle.borderRadius || '0';
+    nativeImageMenuProxy.style.objectFit = computedStyle.backgroundSize === 'cover' ? 'cover' : 'contain';
+
+    if (!nativeImageMenuProxy.isConnected) {
+      document.documentElement.appendChild(nativeImageMenuProxy);
+    }
+
+    return true;
+  }
+
+  function activateNativeImageMenuBypass(imageInfo) {
+    if (!imageInfo) return false;
+    if (!ensureNativeImageMenuProxy(imageInfo)) return false;
+    nativeImageMenuContext = imageInfo;
+    pendingImageContextInfo = imageInfo;
+    scheduleNativeImageMenuCleanup();
+    return true;
+  }
+
+  function bypassSiteImageContextMenu(e) {
+    if (!isContextMenuGesture(e)) return false;
+    var imageInfo = nativeImageMenuContext || getImageInfoFromTarget(e.target);
+    if (!activateNativeImageMenuBypass(imageInfo)) return false;
+    e.stopImmediatePropagation();
+    e.stopPropagation();
+    return true;
   }
 
   function copyImageBlobToClipboard(url) {
@@ -946,7 +1063,7 @@
   }
 
   function tryInjectImageMenu() {
-    if (!pendingImageContextInfo) return;
+    if (!pendingImageContextInfo || nativeImageMenuContext) return;
     var menus = document.querySelectorAll('[role="menu"], .ud__menu-normal-root, .ud__menu-normal');
     for (var i = menus.length - 1; i >= 0; i--) {
       var menu = menus[i];
@@ -957,7 +1074,25 @@
     }
   }
 
+  document.addEventListener('pointerdown', function (e) {
+    if (bypassSiteImageContextMenu(e)) return;
+    cleanupNativeImageMenuBypass();
+  }, true);
+
+  document.addEventListener('mousedown', function (e) {
+    bypassSiteImageContextMenu(e);
+  }, true);
+
+  document.addEventListener('mouseup', function (e) {
+    if (!nativeImageMenuContext || !isContextMenuGesture(e)) return;
+    e.stopImmediatePropagation();
+    e.stopPropagation();
+    scheduleNativeImageMenuCleanup();
+  }, true);
+
   document.addEventListener('contextmenu', function (e) {
+    if (bypassSiteImageContextMenu(e)) return;
+    cleanupNativeImageMenuBypass();
     pendingImageContextInfo = getImageInfoFromTarget(e.target);
     setTimeout(tryInjectImageMenu, 0);
     setTimeout(tryInjectImageMenu, 120);
@@ -973,10 +1108,17 @@
   });
 
   document.addEventListener('click', function () {
+    cleanupNativeImageMenuBypass();
     pendingImageContextInfo = null;
   }, true);
   document.addEventListener('keydown', function (e) {
-    if (e.key === 'Escape') pendingImageContextInfo = null;
+    if (e.key === 'Escape') {
+      cleanupNativeImageMenuBypass();
+      pendingImageContextInfo = null;
+    }
+  }, true);
+  document.addEventListener('scroll', function () {
+    cleanupNativeImageMenuBypass();
   }, true);
 
   document.addEventListener('keydown', function (e) {
