@@ -53,31 +53,64 @@
 
 ### 飞书文档助手 (Feishu Helper)
 
-解除飞书文档复制限制，批量提取文档中的所有图片。
+解除飞书文档复制限制，提取完整文档内容（含 LaTeX 公式），批量提取图片，创建文档副本。
 
 **安装：** 将 [scripts/feishu-helper.user.js](scripts/feishu-helper.user.js) 的内容添加到 Tampermonkey 新脚本中。
 
-**适用页面：** `feishu.cn` 和 `larksuite.com` 下的所有页面
+**适用页面：** `feishu.cn`、`larksuite.com`、`larkoffice.com` 下的所有页面
+
+#### 快捷键
+
+| 快捷键 | 功能 |
+|--------|------|
+| `Cmd+Shift+D` | 创建文档副本（提取完整内容到剪贴板） |
+| `Cmd+Shift+V` | 粘贴副本到新文档 |
+| `Cmd+Shift+I` | 提取页面图片 |
 
 #### 功能
 
 **1. 自动解除复制限制**
 
-脚本在页面加载时自动运行，持续 30 秒加固，覆盖以下限制：
+脚本在页面加载时自动运行，持续 15 秒加固，覆盖以下限制：
 - 禁止选中文本 → 强制 `user-select: text`
 - 禁止右键菜单 → 拦截 `contextmenu` 事件
 - 禁止 Ctrl+C / Ctrl+A → 拦截 `keydown` 事件
 - 透明遮罩层 → 自动隐藏
 - 同源 iframe → 递归处理
 
-**2. 批量提取图片**
+**2. 创建文档副本**
+
+通过 React Fiber 链访问飞书内部 `structService.rootBlock`，直接从数据层提取完整文档内容，绕过虚拟滚动限制。
+
+提取内容包括：
+- 完整文本（不受虚拟滚动影响，获取全部内容块）
+- LaTeX 公式（从 `apool.numToAttrib` 解码，输出 `$...$` / `$$...$$` 格式）
+- 富文本属性（加粗、斜体、删除线、行内代码、链接等转为 Markdown）
+- 文档结构（标题、列表、引用、代码块、分割线等转为 HTML/Markdown）
+
+使用流程：
+1. 在源文档页面按 `Cmd+Shift+D` 提取内容
+2. 手动新建一个飞书文档
+3. 在新文档页面按 `Cmd+Shift+V` 写入剪贴板
+4. 按 `Cmd+V` 粘贴
+
+**3. 批量提取图片**
 
 快捷键 `Cmd+Shift+I` 打开图片提取面板：
 
-- 自动扫描页面中所有 `<img>`、`background-image`、SVG `<image>` 元素
+- 自动扫描页面中所有 `<img>`、`background-image` 元素
 - 弹出面板展示所有图片缩略图和尺寸
 - 支持单张下载或一键全部下载
 - 去重处理，避免重复图片
+
+#### 技术细节：飞书文档数据提取
+
+飞书文档使用虚拟滚动，DOM 中只保留当前视口附近的内容，无法通过滚动加载获取完整文档。本脚本通过以下方式绕过：
+
+1. **React Fiber 访问**：通过 `__reactFiber$` 键遍历组件树，找到 `editorAPI.structService`
+2. **rootBlock 遍历**：`structService.rootBlock.children` 包含文档的所有内容块（不受虚拟滚动影响）
+3. **文本编码解码**：飞书使用自定义的 `attribs + apool` 编码格式，`*N` 表示应用属性 N，`+M` 表示接下来 M 个字符
+4. **LaTeX 提取**：行内公式以 `["equation", "latex_code"]` 属性存储在 `apool.numToAttrib` 中
 
 ---
 

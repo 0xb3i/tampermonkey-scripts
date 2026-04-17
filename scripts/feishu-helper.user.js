@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         飞书文档助手
 // @namespace    https://github.com/tampermonkey-scripts
-// @version      2.0.0
-// @description  解除飞书文档复制限制，批量提取文档图片，创建文档副本
+// @version      3.0.0
+// @description  解除飞书文档复制限制，批量提取文档图片，创建文档副本（含LaTeX公式）
 // @author       You
 // @match        https://*.feishu.cn/*
 // @match        https://*.larksuite.com/*
@@ -85,154 +85,236 @@
     document.addEventListener('DOMContentLoaded', startFreeCopy);
   }
 
-  function getBaseUrl() {
-    return location.origin;
-  }
-
   function getDocToken() {
     var match = location.pathname.match(/\/(docx|wiki|doc|sheet|slides|base)\/([A-Za-z0-9]+)/);
     return match ? match[2] : null;
   }
 
-  function getCsrfToken() {
-    var match = document.cookie.match(/_csrf_token=([^;]+)/);
-    return match ? decodeURIComponent(match[1]) : '';
+  function getStructService() {
+    var contentEl = document.querySelector('[data-content-editable-root="true"]');
+    if (!contentEl) return null;
+    var fiberKey = Object.keys(contentEl).find(function (k) {
+      return k.startsWith('__reactFiber$') || k.startsWith('__reactInternalInstance$');
+    });
+    if (!fiberKey) return null;
+    var fiber = contentEl[fiberKey];
+    var depth = 0;
+    while (fiber && depth < 15) {
+      var props = fiber.memoizedProps || {};
+      if (props.editorAPI && props.editorAPI.structService) {
+        return props.editorAPI.structService;
+      }
+      fiber = fiber.return;
+      depth++;
+    }
+    return null;
   }
 
-  function getDocContent() {
-    var contentEl = document.querySelector('[data-content-editable-root="true"]') ||
-                    document.querySelector('.page-block.root-block') ||
-                    document.querySelector('.doc-content') ||
-                    document.querySelector('.docx-container') ||
-                    document.querySelector('[class*="doc-content"]') ||
-                    document.querySelector('[class*="editor"]');
+  function decodeFeishuAttribs(attribsStr, textStr, numToAttrib) {
+    var result = [];
+    var textIdx = 0;
+    var i = 0;
 
-    if (!contentEl) return null;
+    while (i < attribsStr.length) {
+      var attrs = [];
+      while (i < attribsStr.length && attribsStr[i] === '*') {
+        i++;
+        var numStr = '';
+        while (i < attribsStr.length && /[0-9a-z]/.test(attribsStr[i])) {
+          numStr += attribsStr[i];
+          i++;
+        }
+        var num = parseInt(numStr, 36);
+        if (numToAttrib[num]) {
+          attrs.push(numToAttrib[num]);
+        }
+      }
 
-    annotateKatexInPlace(contentEl);
+      if (i < attribsStr.length && attribsStr[i] === '+') {
+        i++;
+        var countStr = '';
+        while (i < attribsStr.length && /[0-9a-z]/.test(attribsStr[i])) {
+          countStr += attribsStr[i];
+          i++;
+        }
+        var count = parseInt(countStr, 36);
 
-    var clone = contentEl.cloneNode(true);
-    clone.querySelectorAll('script, style').forEach(function (el) { el.remove(); });
-    clone.querySelectorAll('[contenteditable]').forEach(function (el) { el.removeAttribute('contenteditable'); });
+        var equationAttr = null;
+        var linkAttr = null;
+        var isBold = false;
+        var isItalic = false;
+        var isStrike = false;
+        var isInlineCode = false;
 
-    replaceKatexInFragment(clone);
+        for (var ai = 0; ai < attrs.length; ai++) {
+          var a = attrs[ai];
+          if (a[0] === 'equation') equationAttr = a;
+          else if (a[0] === 'link') linkAttr = a;
+          else if (a[0] === 'bold' && a[1] === 'true') isBold = true;
+          else if (a[0] === 'italic' && a[1] === 'true') isItalic = true;
+          else if (a[0] === 'strikethrough' && a[1] === 'true') isStrike = true;
+          else if (a[0] === 'inlineCode' && a[1] === 'true') isInlineCode = true;
+        }
 
-    clone.querySelectorAll('[class]').forEach(function (el) {
-      var keep = [];
-      el.classList.forEach(function (c) {
-        if (/image|img|table|code-block|heading|list|quote/.test(c)) keep.push(c);
-      });
-      el.className = keep.join(' ');
-    });
+        var rawText = textStr.substring(textIdx, textIdx + count);
+
+        if (equationAttr) {
+          var latex = equationAttr[1];
+          if (latex.endsWith('\\n')) latex = latex.slice(0, -2);
+          else if (latex.endsWith('\n')) latex = latex.slice(0, -1);
+
+          var isDisplay = rawText.trim() === '';
+          if (isDisplay) {
+            result.push(' $$' + latex + '$$ ');
+          } else {
+            result.push(' $' + latex + '$ ');
+          }
+        } else {
+          var segment = rawText;
+          if (isInlineCode) segment = '`' + segment + '`';
+          if (isBold) segment = '**' + segment + '**';
+          if (isItalic) segment = '*' + segment + '*';
+          if (isStrike) segment = '~~' + segment + '~~';
+          if (linkAttr) {
+            var href = decodeURIComponent(linkAttr[1] || '');
+            segment = '[' + segment + '](' + href + ')';
+          }
+          result.push(segment);
+        }
+
+        textIdx += count;
+      } else {
+        break;
+      }
+    }
+
+    if (textIdx < textStr.length) {
+      result.push(textStr.substring(textIdx));
+    }
+
+    return result.join('');
+  }
+
+  function decodeBlockText(snap) {
+    if (!snap.text || !snap.text.initialAttributedTexts || !snap.text.apool) return '';
+    var iat = snap.text.initialAttributedTexts;
+    var apool = snap.text.apool;
+    var attribs = (iat.attribs && iat.attribs['0']) || '';
+    var text = (iat.text && iat.text['0']) || '';
+    var numToAttrib = apool.numToAttrib || {};
+    return decodeFeishuAttribs(attribs, text, numToAttrib);
+  }
+
+  function blockToHtml(snap, blockId) {
+    var type = snap.type;
+    var text = decodeBlockText(snap);
+
+    switch (type) {
+      case 'heading1': return '<h1>' + text + '</h1>';
+      case 'heading2': return '<h2>' + text + '</h2>';
+      case 'heading3': return '<h3>' + text + '</h3>';
+      case 'heading4': return '<h4>' + text + '</h4>';
+      case 'heading5': return '<h5>' + text + '</h5>';
+      case 'heading6': return '<h6>' + text + '</h6>';
+      case 'heading7': return '<h6>' + text + '</h6>';
+      case 'heading8': return '<h6>' + text + '</h6>';
+      case 'heading9': return '<h6>' + text + '</h6>';
+      case 'text': return '<p>' + text + '</p>';
+      case 'ordered': return '<li>' + text + '</li>';
+      case 'bullet': return '<li>' + text + '</li>';
+      case 'todo': return '<li>' + (snap.checked ? '☑' : '☐') + ' ' + text + '</li>';
+      case 'quote': return '<blockquote>' + text + '</blockquote>';
+      case 'callout': return '<blockquote>' + text + '</blockquote>';
+      case 'divider': return '<hr>';
+      case 'code':
+        var lang = (snap.language || snap.lang || '').replace(/^plain_text$/, '');
+        return '<pre><code' + (lang ? ' class="language-' + lang + '"' : '') + '>' + text + '</code></pre>';
+      case 'image':
+        var imgToken = snap.image && snap.image.token;
+        var imgSrc = imgToken ? '/space/api/box/stream/download/all/' + imgToken + '/' : '';
+        return '<figure><img src="' + imgSrc + '" alt="' + (snap.image && snap.image.name || '') + '" /></figure>';
+      case 'table':
+        return '<table>' + text + '</table>';
+      default:
+        return text ? '<p>' + text + '</p>' : '';
+    }
+  }
+
+  function blockToMarkdown(snap) {
+    var type = snap.type;
+    var text = decodeBlockText(snap);
+
+    switch (type) {
+      case 'heading1': return '# ' + text;
+      case 'heading2': return '## ' + text;
+      case 'heading3': return '### ' + text;
+      case 'heading4': return '#### ' + text;
+      case 'heading5': return '##### ' + text;
+      case 'heading6': return '###### ' + text;
+      case 'heading7': return '###### ' + text;
+      case 'heading8': return '###### ' + text;
+      case 'heading9': return '###### ' + text;
+      case 'text': return text;
+      case 'ordered': return '1. ' + text;
+      case 'bullet': return '- ' + text;
+      case 'todo': return (snap.checked ? '[x]' : '[ ]') + ' ' + text;
+      case 'quote': return '> ' + text;
+      case 'callout': return '> ' + text;
+      case 'divider': return '---';
+      case 'code':
+        var lang = (snap.language || snap.lang || '').replace(/^plain_text$/, '');
+        return '```' + lang + '\n' + text + '\n```';
+      case 'image':
+        return '![' + (snap.image && snap.image.name || '') + '](' + (snap.image && snap.image.token || '') + ')';
+      default:
+        return text;
+    }
+  }
+
+  function extractFullDoc() {
+    var ss = getStructService();
+    if (!ss || !ss.rootBlock) return null;
+
+    var htmlParts = [];
+    var mdParts = [];
+    var blockCount = 0;
+    var equationCount = 0;
+
+    function processBlock(block, depth) {
+      if (!block || depth > 12) return;
+      if (block.record && block.record.snapshot) {
+        var snap = block.record.snapshot;
+        var type = snap.type;
+
+        if (type === 'page') {
+          // skip root page block
+        } else {
+          var decoded = decodeBlockText(snap);
+          if (decoded.includes('$')) equationCount++;
+
+          var html = blockToHtml(snap, block.record.id);
+          var md = blockToMarkdown(snap);
+
+          if (html) htmlParts.push(html);
+          if (md) mdParts.push(md);
+          blockCount++;
+        }
+      }
+      if (block.children && Array.isArray(block.children)) {
+        for (var i = 0; i < block.children.length; i++) {
+          processBlock(block.children[i], depth + 1);
+        }
+      }
+    }
+
+    processBlock(ss.rootBlock, 0);
 
     return {
-      html: clone.innerHTML,
-      text: clone.innerText,
+      html: htmlParts.join('\n'),
+      text: mdParts.join('\n\n'),
+      blockCount: blockCount,
+      equationCount: equationCount,
     };
-  }
-
-  function annotateKatexInPlace(root) {
-    var katexEls = root.querySelectorAll('.katex:not([data-latex]):not([data-latex-display])');
-    for (var i = 0; i < katexEls.length; i++) {
-      var el = katexEls[i];
-      var ann = el.querySelector('.katex-mathml annotation');
-      if (ann) {
-        var isDisplay = el.closest('.katex-display') !== null;
-        el.setAttribute(isDisplay ? 'data-latex-display' : 'data-latex', ann.textContent);
-      }
-    }
-  }
-
-  function replaceKatexInFragment(fragment) {
-    var katexEls = fragment.querySelectorAll('.katex');
-    for (var i = 0; i < katexEls.length; i++) {
-      var el = katexEls[i];
-      var latex = null;
-      var isDisplay = false;
-
-      if (el.hasAttribute('data-latex-display')) {
-        latex = el.getAttribute('data-latex-display');
-        isDisplay = true;
-      } else if (el.hasAttribute('data-latex')) {
-        latex = el.getAttribute('data-latex');
-      } else {
-        var ann = el.querySelector('.katex-mathml annotation');
-        if (ann) {
-          latex = ann.textContent;
-          isDisplay = el.closest('.katex-display') !== null;
-        }
-      }
-
-      if (latex !== null) {
-        var delimiters = isDisplay ? ['$$', '$$'] : [' $', '$ '];
-        var tex = delimiters[0] + latex + delimiters[1];
-        var textNode = document.createTextNode(tex);
-        if (el.replaceWith) { el.replaceWith(textNode); }
-        else if (el.parentNode) { el.parentNode.replaceChild(textNode, el); }
-      }
-    }
-
-    var mjxEls = fragment.querySelectorAll('mjx-container');
-    for (var j = 0; j < mjxEls.length; j++) {
-      var mjx = mjxEls[j];
-      var mathEl = mjx.querySelector('math');
-      if (mathEl) {
-        var ann2 = mathEl.querySelector('annotation');
-        if (ann2) {
-          var isDisplay2 = mjx.getAttribute('display') === 'true' || mjx.hasAttribute('display');
-          var delimiters2 = isDisplay2 ? ['$$', '$$'] : [' $', '$ '];
-          var tex2 = delimiters2[0] + ann2.textContent + delimiters2[1];
-          var textNode2 = document.createTextNode(tex2);
-          if (mjx.replaceWith) { mjx.replaceWith(textNode2); }
-          else if (mjx.parentNode) { mjx.parentNode.replaceChild(textNode2, mjx); }
-        }
-      }
-    }
-  }
-
-  function scrollAndExtract(callback) {
-    var scrollEl = document.querySelector('.bear-web-x-container') ||
-                   document.querySelector('[class*="scroll-container"]') ||
-                   document.querySelector('[class*="doc-scroll"]') ||
-                   document.querySelector('.wiki-content') ||
-                   document.scrollingElement ||
-                   document.documentElement;
-
-    var btn = document.getElementById('__feishu_duplicate_btn__');
-    if (btn) btn.textContent = '滚动加载中...';
-
-    var scrollHeight = scrollEl.scrollHeight;
-    var currentPos = 0;
-    var scrollStep = 800;
-    var stableCount = 0;
-
-    function doScroll() {
-      currentPos += scrollStep;
-      scrollEl.scrollTo({ top: currentPos, behavior: 'auto' });
-      window.scrollTo(0, currentPos);
-
-      var newHeight = scrollEl.scrollHeight;
-      if (newHeight > scrollHeight) {
-        scrollHeight = newHeight;
-        stableCount = 0;
-      } else {
-        stableCount++;
-      }
-
-      if (currentPos < scrollHeight - window.innerHeight && stableCount < 5) {
-        setTimeout(doScroll, 100);
-      } else {
-        scrollEl.scrollTo({ top: 0, behavior: 'auto' });
-        window.scrollTo(0, 0);
-        setTimeout(function () {
-          var content = getDocContent();
-          if (btn) btn.textContent = '创建副本';
-          callback(content);
-        }, 500);
-      }
-    }
-
-    doScroll();
   }
 
   function getPendingPaste() {
@@ -260,27 +342,27 @@
       return;
     }
 
-    scrollAndExtract(function (content) {
-      if (!content) {
-        alert('无法提取文档内容');
-        return;
-      }
+    var content = extractFullDoc();
+    if (!content) {
+      alert('无法提取文档内容，请确保文档已完全加载');
+      return;
+    }
 
-      var title = document.querySelector('title');
-      var docTitle = title ? title.textContent.replace(/ - 飞书云文档$/, '').replace(/ - Lark$/, '') : '副本';
+    var title = document.querySelector('title');
+    var docTitle = title ? title.textContent.replace(/ - 飞书云文档$/, '').replace(/ - Lark$/, '') : '副本';
 
-      setPendingPaste({ html: content.html, text: content.text, title: docTitle });
+    setPendingPaste({ html: content.html, text: content.text, title: docTitle });
 
-      showNotice(
-        '✅',
-        '文档内容已提取',
-        '接下来请：<br>' +
-        '1. 手动新建一个飞书文档<br>' +
-        '2. 打开空白文档<br>' +
-        '3. 点击右下角绿色的 <b>粘贴副本</b> 按钮<br><br>' +
-        '内容会在新文档页面写入剪贴板，然后按 Cmd+V 粘贴即可'
-      );
-    });
+    showNotice(
+      '✅',
+      '文档内容已提取',
+      '共 ' + content.blockCount + ' 个内容块，其中 ' + content.equationCount + ' 个含公式<br><br>' +
+      '接下来请：<br>' +
+      '1. 手动新建一个飞书文档<br>' +
+      '2. 打开空白文档<br>' +
+      '3. 按 <kbd style="background:#f0f0f0;padding:2px 6px;border-radius:4px;border:1px solid #ccc;">Cmd+Shift+V</kbd> 粘贴副本<br><br>' +
+      '内容会写入剪贴板，然后按 Cmd+V 粘贴即可'
+    );
   }
 
   function pasteIntoDoc() {
@@ -334,86 +416,6 @@
     });
   }
 
-  function downloadAsHTML(docTitle, content) {
-    var html = '<!DOCTYPE html><html><head><meta charset="utf-8"><title>' + docTitle + ' (副本)</title>' +
-      '<style>body{font-family:-apple-system,sans-serif;max-width:800px;margin:40px auto;padding:0 20px;line-height:1.8;}img{max-width:100%;}table{border-collapse:collapse;width:100%;}td,th{border:1px solid #ddd;padding:8px;}pre{background:#f5f5f5;padding:12px;border-radius:6px;overflow-x:auto;}code{background:#f0f0f0;padding:2px 4px;border-radius:3px;}</style>' +
-      '</head><body>' + content.html + '</body></html>';
-
-    var blob = new Blob([html], { type: 'text/html' });
-    var url = URL.createObjectURL(blob);
-    var a = document.createElement('a');
-    a.href = url;
-    a.download = docTitle + '_副本.html';
-    a.click();
-    URL.revokeObjectURL(url);
-
-    alert('已导出为 HTML 文件（飞书编辑器支持直接粘贴 HTML）。\n\n操作步骤：\n1. 打开一个新的飞书文档\n2. 用浏览器打开导出的 HTML 文件\n3. 全选复制 → 粘贴到飞书文档');
-  }
-
-  function createFloatingButton() {
-    if (document.getElementById('__feishu_toolbar__')) return;
-
-    var container = document.createElement('div');
-    container.id = '__feishu_toolbar__';
-    container.style.cssText = 'position:fixed;bottom:24px;right:24px;z-index:999998;display:flex;flex-direction:column;gap:8px;';
-
-    if (getPendingPaste()) {
-      var pasteBtn = document.createElement('button');
-      pasteBtn.id = '__feishu_paste_btn__';
-      pasteBtn.textContent = '粘贴副本';
-      pasteBtn.style.cssText = 'background:#00b578;color:#fff;border:none;padding:10px 16px;border-radius:8px;cursor:pointer;font-size:14px;box-shadow:0 2px 8px rgba(0,0,0,0.2);white-space:nowrap;';
-      pasteBtn.onclick = pasteIntoDoc;
-      container.appendChild(pasteBtn);
-    }
-
-    if (getDocToken()) {
-      var dupBtn = document.createElement('button');
-      dupBtn.id = '__feishu_duplicate_btn__';
-      dupBtn.textContent = '创建副本';
-      dupBtn.style.cssText = 'background:#3370ff;color:#fff;border:none;padding:10px 16px;border-radius:8px;cursor:pointer;font-size:14px;box-shadow:0 2px 8px rgba(0,0,0,0.2);white-space:nowrap;';
-      dupBtn.onclick = duplicateDocument;
-      container.appendChild(dupBtn);
-    }
-
-    var imgBtn = document.createElement('button');
-    imgBtn.id = '__feishu_img_btn__';
-    imgBtn.textContent = '提取图片';
-    imgBtn.style.cssText = 'background:#fff;color:#333;border:1px solid #ddd;padding:10px 16px;border-radius:8px;cursor:pointer;font-size:14px;box-shadow:0 2px 8px rgba(0,0,0,0.1);white-space:nowrap;';
-    imgBtn.onclick = function () {
-      var images = extractImages();
-      if (images.length === 0) {
-        alert('当前页面未找到图片');
-      } else {
-        createImagePanel(images);
-      }
-    };
-
-    container.appendChild(dupBtn);
-    container.appendChild(imgBtn);
-    document.body.appendChild(container);
-  }
-
-  document.addEventListener('DOMContentLoaded', function () {
-    function tryCreateButton() {
-      if (!document.getElementById('__feishu_toolbar__') && document.body) {
-        createFloatingButton();
-      }
-    }
-    setTimeout(tryCreateButton, 2000);
-    setTimeout(tryCreateButton, 5000);
-    setTimeout(tryCreateButton, 10000);
-  });
-
-  var lastUrl = location.href;
-  setInterval(function () {
-    if (location.href !== lastUrl) {
-      lastUrl = location.href;
-      var existing = document.getElementById('__feishu_toolbar__');
-      if (existing) existing.remove();
-      setTimeout(createFloatingButton, 1500);
-    }
-  }, 1000);
-
   function extractImages() {
     var images = [];
     var seen = new Set();
@@ -441,19 +443,6 @@
           alt: '',
           width: el.offsetWidth,
           height: el.offsetHeight,
-        });
-      }
-    });
-
-    document.querySelectorAll('image').forEach(function (img) {
-      var href = img.getAttribute('href') || img.getAttribute('xlink:href');
-      if (href && !seen.has(href)) {
-        seen.add(href);
-        images.push({
-          src: href,
-          alt: '',
-          width: 0,
-          height: 0,
         });
       }
     });
@@ -515,7 +504,18 @@
   }
 
   document.addEventListener('keydown', function (e) {
-    if (e.metaKey && e.shiftKey && e.key.toLowerCase() === 'i') {
+    if (!e.metaKey || !e.shiftKey) return;
+    var k = e.key.toLowerCase();
+
+    if (k === 'd') {
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      duplicateDocument();
+    } else if (k === 'v') {
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      pasteIntoDoc();
+    } else if (k === 'i') {
       e.preventDefault();
       e.stopImmediatePropagation();
       var images = extractImages();
@@ -529,4 +529,5 @@
 
   window.__feishuExtractImages = extractImages;
   window.__feishuDuplicateDoc = duplicateDocument;
+  window.__feishuExtractFullDoc = extractFullDoc;
 })();
