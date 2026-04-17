@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         飞书文档助手
 // @namespace    https://github.com/tampermonkey-scripts
-// @version      1.0.0
+// @version      1.1.0
 // @description  解除飞书文档复制限制，批量提取文档图片
 // @author       You
 // @match        https://*.feishu.cn/*
@@ -14,10 +14,15 @@
 (function () {
   'use strict';
 
-  var EVENTS = ['copy', 'cut', 'paste', 'contextmenu', 'selectstart', 'dragstart', 'keydown', 'keyup'];
-  var STYLE_CSS = '*{user-select:text!important;-webkit-user-select:text!important;pointer-events:auto!important}';
+  var EVENTS = ['copy', 'cut', 'contextmenu', 'keydown', 'keyup'];
+  var STYLE_CSS = '*{user-select:text!important;-webkit-user-select:text!important}';
+
+  var installed = new WeakSet();
 
   function install(win) {
+    if (installed.has(win)) return;
+    installed.add(win);
+
     try {
       var doc = win.document;
 
@@ -44,30 +49,33 @@
         });
       });
 
+      removeOverlays(win);
+    } catch (_) {}
+  }
+
+  function removeOverlays(win) {
+    try {
+      var doc = win.document;
       doc.querySelectorAll('*').forEach(function (el) {
         var cs = win.getComputedStyle(el);
-        if ((cs.position === 'fixed' || cs.position === 'absolute') && parseFloat(cs.opacity) === 0) {
-          el.style.pointerEvents = 'auto';
+        if ((cs.position === 'fixed' || cs.position === 'absolute') && parseFloat(cs.opacity) === 0 && cs.pointerEvents !== 'none') {
           el.style.display = 'none';
         }
       });
     } catch (_) {}
   }
 
-  function harden(win) {
-    install(win);
-    try {
-      win.document.querySelectorAll('iframe').forEach(function (f) {
-        try { if (f.contentWindow && f.contentDocument) install(f.contentWindow); } catch (_) {}
-      });
-    } catch (_) {}
-  }
-
   function startFreeCopy() {
+    install(window);
+
     var t0 = performance.now();
     (function loop() {
-      harden(window);
-      if (performance.now() - t0 < 30000) requestAnimationFrame(loop);
+      try {
+        window.document.querySelectorAll('iframe').forEach(function (f) {
+          try { if (f.contentWindow && f.contentDocument) install(f.contentWindow); } catch (_) {}
+        });
+      } catch (_) {}
+      if (performance.now() - t0 < 15000) requestAnimationFrame(loop);
     })();
   }
 
