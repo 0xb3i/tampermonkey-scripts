@@ -49,6 +49,38 @@
 
 `cleanText` 会自动将文本按 `$...$` / `$$...$$` 分段处理，只对非 LaTeX 部分做净化，LaTeX 内部的括号和符号完整保留。同时在 LaTeX 与相邻文本/标点之间自动插入空格，确保飞书等平台能正确渲染。
 
+---
+
+### 飞书文档助手 (Feishu Helper)
+
+解除飞书文档复制限制，批量提取文档中的所有图片。
+
+**安装：** 将 [scripts/feishu-helper.user.js](scripts/feishu-helper.user.js) 的内容添加到 Tampermonkey 新脚本中。
+
+**适用页面：** `feishu.cn` 和 `larksuite.com` 下的所有页面
+
+#### 功能
+
+**1. 自动解除复制限制**
+
+脚本在页面加载时自动运行，持续 30 秒加固，覆盖以下限制：
+- 禁止选中文本 → 强制 `user-select: text`
+- 禁止右键菜单 → 拦截 `contextmenu` 事件
+- 禁止 Ctrl+C / Ctrl+A → 拦截 `keydown` 事件
+- 透明遮罩层 → 自动隐藏
+- 同源 iframe → 递归处理
+
+**2. 批量提取图片**
+
+快捷键 `Ctrl+Shift+E`（Mac: `Cmd+Shift+E`）打开图片提取面板：
+
+- 自动扫描页面中所有 `<img>`、`background-image`、SVG `<image>` 元素
+- 弹出面板展示所有图片缩略图和尺寸
+- 支持单张下载或一键全部下载
+- 去重处理，避免重复图片
+
+---
+
 ## 开发
 
 ### 安装依赖
