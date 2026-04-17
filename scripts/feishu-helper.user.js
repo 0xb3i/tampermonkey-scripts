@@ -360,7 +360,7 @@
       '接下来请：<br>' +
       '1. 手动新建一个飞书文档<br>' +
       '2. 打开空白文档<br>' +
-      '3. 按 <kbd style="background:#f0f0f0;padding:2px 6px;border-radius:4px;border:1px solid #ccc;">Cmd+Shift+V</kbd> 粘贴副本<br><br>' +
+      '3. 按 <kbd style="background:#f0f0f0;padding:2px 6px;border-radius:4px;border:1px solid #ccc;">Cmd+Shift+P</kbd> 粘贴副本<br><br>' +
       '内容会写入剪贴板，然后按 Cmd+V 粘贴即可'
     );
   }
@@ -511,7 +511,7 @@
       e.preventDefault();
       e.stopImmediatePropagation();
       duplicateDocument();
-    } else if (k === 'v') {
+    } else if (k === 'p') {
       e.preventDefault();
       e.stopImmediatePropagation();
       pasteIntoDoc();
