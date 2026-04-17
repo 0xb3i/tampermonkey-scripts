@@ -6,6 +6,7 @@
 // @author       You
 // @match        https://*.feishu.cn/*
 // @match        https://*.larksuite.com/*
+// @match        https://*.larkoffice.com/*
 // @grant        none
 // @run-at       document-start
 // ==/UserScript==
