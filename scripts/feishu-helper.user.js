@@ -147,9 +147,13 @@
     return EMOJI_MAP[emojiId] || '';
   }
 
+  function escapeHtml(str) {
+    return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  }
+
   function blockToHtml(snap, block, childHtmlArr) {
     var type = snap.type;
-    var text = decodeBlockText(snap);
+    var text = escapeHtml(decodeBlockText(snap));
     var childHtml = childHtmlArr ? childHtmlArr.join('\n') : '';
 
     switch (type) {
@@ -197,7 +201,7 @@
           if (bgColor) containerStyle += 'background:' + bgColor + ';';
           containerStyle += 'padding:12px 16px;border-radius:8px;"';
         }
-        return '<div class="callout-container"' + containerStyle + ' data-emoji-id="' + (snap.emoji_id || '') + '"><div class="callout-block">' + (emoji ? '<span>' + emoji + '</span> ' : '') + childHtml + '</div></div>';
+        return '<div class="callout-container"' + containerStyle + ' data-emoji-id="' + escapeHtml(snap.emoji_id || '') + '"><div class="callout-block">' + (emoji ? '<span>' + emoji + '</span> ' : '') + childHtml + '</div></div>';
       case 'quote_container':
         return '<blockquote>' + childHtml + '</blockquote>';
       case 'grid':
@@ -250,7 +254,7 @@
             if (cellBlock.children && Array.isArray(cellBlock.children)) {
               cellBlock.children.forEach(function(gc) {
                 if (gc.record && gc.record.snapshot) {
-                  var gcText = decodeBlockText(gc.record.snapshot);
+                  var gcText = escapeHtml(decodeBlockText(gc.record.snapshot));
                   if (gcText) cellChildHtml.push(gcText);
                 }
               });
@@ -764,4 +768,42 @@
 
   window.__feishuExtractFullDoc = extractFullDoc;
   window.__feishuDuplicateDoc = duplicateDocument;
+  window.__feishuDebugEquations = function () {
+    var ss = getStructService();
+    if (!ss || !ss.rootBlock) { console.log('no rootBlock'); return; }
+    var equations = [];
+    function find(block, depth) {
+      if (!block || depth > 12) return;
+      if (block.record && block.record.snapshot) {
+        var snap = block.record.snapshot;
+        if (snap.text && snap.text.apool && snap.text.apool.numToAttrib) {
+          var nta = snap.text.apool.numToAttrib;
+          for (var num in nta) {
+            if (nta[num][0] === 'equation') {
+              equations.push({ num: num, latex: nta[num][1], len: nta[num][1].length });
+            }
+          }
+        }
+      }
+      if (block.children) block.children.forEach(function (c) { find(c, depth + 1); });
+    }
+    find(ss.rootBlock, 0);
+    console.log('Total equations:', equations.length);
+    var truncated = equations.filter(function (e) {
+      var open = (e.latex.match(/\{/g) || []).length;
+      var close = (e.latex.match(/\}/g) || []).length;
+      return open !== close;
+    });
+    console.log('Possibly truncated:', truncated.length);
+    equations.forEach(function (e, i) {
+      console.log('[' + i + '] len=' + e.len + ' ' + e.latex.substring(0, 150));
+    });
+    if (truncated.length > 0) {
+      console.log('\n--- Truncated ---');
+      truncated.forEach(function (e, i) {
+        console.log('[' + i + '] len=' + e.len + ' ' + e.latex);
+      });
+    }
+    return equations;
+  };
 })();
