@@ -5,6 +5,9 @@
 // @description  复制时自动去除加粗/括号/引号，并将数学公式提取为 LaTeX $$ 格式，兼容网站自带复制按钮
 // @author       You
 // @match        *://*/*
+// @exclude      https://*.feishu.cn/*
+// @exclude      https://*.larksuite.com/*
+// @exclude      https://*.larkoffice.com/*
 // @grant        none
 // @run-at       document-start
 // ==/UserScript==

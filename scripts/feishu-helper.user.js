@@ -14,7 +14,7 @@
 (function () {
   'use strict';
 
-  var EVENTS = ['contextmenu', 'keydown', 'keyup'];
+  var EVENTS = ['copy', 'cut', 'contextmenu', 'keydown', 'keyup'];
   var STYLE_CSS = '*{user-select:text!important;-webkit-user-select:text!important}';
 
   var installed = new WeakSet();
