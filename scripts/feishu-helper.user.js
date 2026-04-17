@@ -238,9 +238,15 @@
       case 'heading7': return '<h6>' + text + '</h6>';
       case 'heading8': return '<h6>' + text + '</h6>';
       case 'heading9': return '<h6>' + text + '</h6>';
-      case 'text': return '<p>' + text + '</p>';
-      case 'ordered': return '<li>' + text + '</li>';
-      case 'bullet': return '<li>' + text + '</li>';
+      case 'text':
+        if (childHtml) return '<p>' + text + '</p>' + childHtml;
+        return '<p>' + text + '</p>';
+      case 'ordered':
+        if (childHtml) return '<li>' + text + '<ul>' + childHtml + '</ul></li>';
+        return '<li>' + text + '</li>';
+      case 'bullet':
+        if (childHtml) return '<li>' + text + '<ul>' + childHtml + '</ul></li>';
+        return '<li>' + text + '</li>';
       case 'todo': return '<li>' + (snap.checked ? '☑' : '☐') + ' ' + text + '</li>';
       case 'divider': return '<hr>';
       case 'code':
@@ -248,7 +254,7 @@
         return '<pre><code' + (lang ? ' class="language-' + lang + '"' : '') + '>' + text + '</code></pre>';
       case 'image':
         var imgToken = snap.image && snap.image.token;
-        var imgSrc = imgToken ? 'https://internal-api-drive-stream.feishu.cn/space/api/box/stream/download/all/' + imgToken + '/' : '';
+        var imgSrc = imgToken ? location.origin + '/space/api/box/stream/download/preview/' + imgToken + '/?preview_type=16' : '';
         var imgAlt = (snap.image && snap.image.name) || '';
         var caption = '';
         if (snap.image && snap.image.caption && snap.image.caption.text) {
@@ -352,16 +358,24 @@
       case 'heading7': return '###### ' + text;
       case 'heading8': return '###### ' + text;
       case 'heading9': return '###### ' + text;
-      case 'text': return text;
-      case 'ordered': return '1. ' + text;
-      case 'bullet': return '- ' + text;
+      case 'text':
+        if (childMd) return text + '\n' + childMd;
+        return text;
+      case 'ordered':
+        if (childMd) return '1. ' + text + '\n' + childMd.split('\n').map(function(l) { return '  ' + l; }).join('\n');
+        return '1. ' + text;
+      case 'bullet':
+        if (childMd) return '- ' + text + '\n' + childMd.split('\n').map(function(l) { return '  ' + l; }).join('\n');
+        return '- ' + text;
       case 'todo': return (snap.checked ? '[x]' : '[ ]') + ' ' + text;
       case 'divider': return '---';
       case 'code':
         var lang = (snap.language || snap.lang || '').replace(/^plain_text$/, '');
         return '```' + lang + '\n' + text + '\n```';
       case 'image':
-        return '![' + (snap.image && snap.image.name || '') + '](' + (snap.image && snap.image.token || '') + ')';
+        var imgTokenMd = snap.image && snap.image.token;
+        var imgSrcMd = imgTokenMd ? location.origin + '/space/api/box/stream/download/preview/' + imgTokenMd + '/?preview_type=16' : '';
+        return '![' + (snap.image && snap.image.name || '') + '](' + imgSrcMd + ')';
       case 'callout':
         var emoji = getEmoji(snap.emoji_id);
         return (emoji ? emoji + ' ' : '') + childMd.split('\n').map(function(l) { return '> ' + l; }).join('\n');
@@ -465,7 +479,7 @@
         var childHtmlArr = [];
         var childMdArr = [];
 
-        if (CONTAINER_TYPES[type] && block.children && Array.isArray(block.children)) {
+        if (block.children && Array.isArray(block.children) && block.children.length > 0) {
           for (var ci = 0; ci < block.children.length; ci++) {
             var childResult = processBlockInner(block.children[ci], depth + 1);
             if (childResult) {
@@ -503,7 +517,7 @@
       var childHtmlArr = [];
       var childMdArr = [];
 
-      if (CONTAINER_TYPES[type] && block.children && Array.isArray(block.children)) {
+      if (block.children && Array.isArray(block.children) && block.children.length > 0) {
         for (var ci = 0; ci < block.children.length; ci++) {
           var childResult = processBlockInner(block.children[ci], depth + 1);
           if (childResult) {
