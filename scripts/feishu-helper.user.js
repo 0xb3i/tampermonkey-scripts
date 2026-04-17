@@ -91,13 +91,8 @@
           var latex = equationAttr[1];
           if (latex.endsWith('\\n')) latex = latex.slice(0, -2);
           else if (latex.endsWith('\n')) latex = latex.slice(0, -1);
-
-          var isDisplay = rawText.trim() === '';
-          if (isDisplay) {
-            result.push(' $$' + latex + '$$ ');
-          } else {
-            result.push(' $' + latex + '$ ');
-          }
+          latex = latex.trim();
+          result.push(' $' + latex + '$ ');
         } else {
           var segment = rawText;
           if (isInlineCode) segment = '`' + segment + '`';
@@ -372,13 +367,30 @@
       tableData.push(row);
     }
 
-    var md = '| ' + cols.map(function(_, i) { return '列' + (i + 1); }).join(' | ') + ' |\n';
+    var md = '| ' + cols.map(function() { return ''; }).join(' | ') + ' |\n';
     md += '| ' + cols.map(function() { return '---'; }).join(' | ') + ' |\n';
     tableData.forEach(function(row) {
       md += '| ' + row.join(' | ') + ' |\n';
     });
 
     return md.trim();
+  }
+
+  function normalizePlainText(text) {
+    return text
+      .split(/(```[\s\S]*?```)/g)
+      .map(function (part) {
+        if (part.startsWith('```') && part.endsWith('```')) return part;
+        return part
+          .replace(/[\u200B\u200C\u200D\uFEFF]/g, '')
+          .replace(/\r\n/g, '\n')
+          .replace(/^[ \t]+$/gm, '')
+          .replace(/[ \t]+\n/g, '\n')
+          .replace(/\n{3,}/g, '\n\n');
+      })
+      .join('')
+      .replace(/^\n+/, '')
+      .replace(/\n+$/, '');
   }
 
   function extractFullDoc() {
@@ -466,7 +478,7 @@
 
     return {
       html: htmlParts.join('\n'),
-      text: mdParts.join('\n\n'),
+      text: normalizePlainText(mdParts.join('\n')),
       blockCount: blockCount,
       equationCount: equationCount,
     };
@@ -584,6 +596,39 @@
     });
   }
 
+  function buildExportHtml(title, bodyHtml) {
+    return '<!DOCTYPE html><html><head><meta charset="utf-8"><title>' + title + '</title>' +
+      '<style>' +
+      'body{max-width:960px;margin:0 auto;padding:40px 48px;font:16px/1.75 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;color:#1f2329;background:#fff;}' +
+      'h1,h2,h3,h4,h5,h6{line-height:1.35;margin:1.2em 0 0.6em;}' +
+      'p,li,blockquote,pre,table,figure{margin:0.75em 0;}' +
+      'ul,ol{padding-left:1.6em;}' +
+      'blockquote{border-left:4px solid #d0d7de;padding-left:1em;color:#57606a;}' +
+      'pre{background:#f6f8fa;padding:12px 16px;border-radius:8px;overflow:auto;white-space:pre-wrap;}' +
+      'code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;}' +
+      'table{width:100%;border-collapse:collapse;font-size:14px;}' +
+      'td,th{border:1px solid #d0d7de;padding:8px 10px;vertical-align:top;}' +
+      'img{max-width:100%;height:auto;display:block;margin:0 auto;}' +
+      'figure{margin:1em 0;text-align:center;}' +
+      'figcaption{margin-top:8px;color:#57606a;font-size:13px;}' +
+      'hr{border:none;border-top:1px solid #d0d7de;margin:24px 0;}' +
+      '@page{size:auto;margin:16mm 14mm;}' +
+      '@media print{body{padding:0;}a{text-decoration:none;color:inherit;}}' +
+      '</style></head><body>' + bodyHtml + '</body></html>';
+  }
+
+  function downloadTextFile(filename, content, mimeType) {
+    var blob = new Blob([content], { type: mimeType || 'text/plain;charset=utf-8' });
+    var url = URL.createObjectURL(blob);
+    var a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(function () { URL.revokeObjectURL(url); }, 1000);
+  }
+
   function showToast(msg, duration) {
     var existing = document.getElementById('__feishu_toast__');
     if (existing) existing.remove();
@@ -621,14 +666,84 @@
       var title = document.querySelector('title');
       var docTitle = title ? title.textContent.replace(/ - 飞书云文档$/, '').replace(/ - Lark$/, '') : '副本';
 
-      convertImagesToBase64(content.html).then(function (htmlWithImages) {
-        content.html = htmlWithImages;
-        return setPendingPaste({ html: content.html, text: content.text, title: docTitle });
-      }).then(function () {
-        var imgCount = (content.html.match(/data:image/g) || []).length;
+      setPendingPaste({ html: content.html, text: content.text, title: docTitle }).then(function () {
+        var imgCount = (content.text.match(/!\[/g) || []).length;
         showToast('✅ 已提取 ' + content.blockCount + ' 块 · ' + content.equationCount + ' 公式 · ' + imgCount + ' 图片', 3000);
       });
     }, 50);
+  }
+
+  function exportDocumentAsHtml() {
+    showToast('⏳ 导出 HTML 中...', 0);
+
+    setTimeout(function () {
+      var content = extractFullDoc();
+      if (!content) {
+        showToast('⚠️ 导出失败，请确保文档已加载');
+        return;
+      }
+
+      var title = document.querySelector('title');
+      var docTitle = title ? title.textContent.replace(/ - 飞书云文档$/, '').replace(/ - Lark$/, '') : '副本';
+
+      convertImagesToBase64(content.html).then(function (htmlWithImages) {
+        var fullHtml = buildExportHtml(docTitle, htmlWithImages);
+        var safeName = docTitle.replace(/[\\/:*?"<>|]/g, '_').trim() || 'feishu-export';
+        downloadTextFile(safeName + '.html', fullHtml, 'text/html;charset=utf-8');
+        var imgCount = (htmlWithImages.match(/data:image/g) || []).length;
+        showToast('✅ 已导出 HTML · ' + content.blockCount + ' 块 · ' + content.equationCount + ' 公式 · ' + imgCount + ' 图片', 3000);
+      }).catch(function () {
+        showToast('⚠️ 导出 HTML 失败', 3000);
+      });
+    }, 50);
+  }
+
+  function getActiveBodyEditor() {
+    return document.querySelector('.editor-kit-container[contenteditable="true"]') ||
+      document.querySelector('[data-content-editable-root="true"]');
+  }
+
+  function writePlainTextToClipboard(text) {
+    return new Promise(function (resolve, reject) {
+      var handled = false;
+
+      function cleanup() {
+        document.removeEventListener('copy', onCopy, true);
+      }
+
+      function onCopy(e) {
+        handled = true;
+        e.preventDefault();
+        e.stopImmediatePropagation();
+        if (e.clipboardData) {
+          e.clipboardData.setData('text/plain', text);
+        }
+      }
+
+      document.addEventListener('copy', onCopy, true);
+
+      try {
+        var ok = document.execCommand('copy');
+        cleanup();
+        if (handled || ok) {
+          resolve();
+          return;
+        }
+      } catch (err) {
+        cleanup();
+      }
+
+      if (!navigator.clipboard || !navigator.clipboard.write) {
+        reject(new Error('clipboard unavailable'));
+        return;
+      }
+
+      var clipboardItem = new ClipboardItem({
+        'text/plain': new Blob([text], { type: 'text/plain' }),
+      });
+
+      navigator.clipboard.write([clipboardItem]).then(resolve).catch(reject);
+    });
   }
 
   function pasteIntoDoc() {
@@ -639,18 +754,24 @@
       }
 
       var content = pendingPaste;
-      var html = '<!DOCTYPE html><html><head><meta charset="utf-8"><title>' + content.title + '</title></head><body>' + content.html + '</body></html>';
-
-      var blob = new Blob([html], { type: 'text/html' });
-      var clipboardItem = new ClipboardItem({
-        'text/html': blob,
-        'text/plain': new Blob([content.text], { type: 'text/plain' }),
-      });
-
-      navigator.clipboard.write([clipboardItem]).then(function () {
+      writePlainTextToClipboard(content.text).then(function () {
         showToast('📋 已写入剪贴板，按 Cmd+V 粘贴', 3000);
       }).catch(function () {
-        showToast('⚠️ 写入剪贴板失败', 3000);
+        var editor = getActiveBodyEditor();
+        if (!editor) {
+          showToast('⚠️ 写入剪贴板失败且未找到编辑器', 3000);
+          return;
+        }
+        editor.focus();
+        var dt = new DataTransfer();
+        dt.setData('text/plain', content.text);
+        var pasteEvent = new ClipboardEvent('paste', {
+          clipboardData: dt,
+          bubbles: true,
+          cancelable: true
+        });
+        editor.dispatchEvent(pasteEvent);
+        showToast('⚠️ 剪贴板写入失败，已改为兜底粘贴，格式可能有偏差', 3500);
       });
     });
   }
@@ -742,6 +863,122 @@
     });
   }
 
+  function getImageInfoFromTarget(target) {
+    var img = target.closest && target.closest('img');
+    if (img) {
+      var src = img.currentSrc || img.src || img.getAttribute('data-src') || img.getAttribute('data-original');
+      if (!src) return null;
+      return {
+        src: src,
+        alt: img.alt || '',
+        width: img.naturalWidth || img.width || 0,
+        height: img.naturalHeight || img.height || 0,
+      };
+    }
+
+    var el = target.closest && target.closest('[style*="background-image"]');
+    if (!el) return null;
+    var bg = getComputedStyle(el).backgroundImage || '';
+    var match = bg.match(/url\(["']?([^"')]+)["']?\)/);
+    if (!match || !match[1]) return null;
+    return {
+      src: match[1],
+      alt: '',
+      width: el.offsetWidth || 0,
+      height: el.offsetHeight || 0,
+    };
+  }
+
+  function copyImageBlobToClipboard(url) {
+    return fetch(url, { credentials: 'include' }).then(function (res) {
+      if (!res.ok) throw new Error('fetch failed');
+      return res.blob();
+    }).then(function (blob) {
+      if (!navigator.clipboard || !navigator.clipboard.write) {
+        throw new Error('clipboard unavailable');
+      }
+      var type = blob.type || 'image/png';
+      return navigator.clipboard.write([
+        new ClipboardItem((function () {
+          var item = {};
+          item[type] = blob;
+          return item;
+        })())
+      ]);
+    });
+  }
+
+  var pendingImageContextInfo = null;
+
+  function injectImageMenuItem(menu) {
+    if (!menu || menu.querySelector('[data-feishu-copy-image-item="true"]')) return;
+    if (!pendingImageContextInfo) return;
+
+    var firstItem = menu.querySelector('li, [role="menuitem"], .ud__menu-normal-item');
+    var item = document.createElement(firstItem && firstItem.tagName ? firstItem.tagName : 'li');
+    item.setAttribute('data-feishu-copy-image-item', 'true');
+    item.setAttribute('role', 'menuitem');
+    item.className = firstItem && firstItem.className ? firstItem.className : 'ud__menu-normal-item ud__menu-normal-item--root-normal ud-typography-body-0';
+    item.style.cursor = 'pointer';
+
+    if (firstItem) {
+      item.innerHTML = firstItem.innerHTML;
+      var titleNode = item.querySelector('.ud__menu-normal-item-title-content') || item.querySelector('[class*="title"]') || item;
+      titleNode.textContent = '复制图片';
+    } else {
+      item.innerHTML = '<div class="ud__menu-normal-item-title-content">复制图片</div>';
+    }
+
+    item.addEventListener('click', function (e) {
+      e.preventDefault();
+      e.stopPropagation();
+      var imageInfo = pendingImageContextInfo;
+      pendingImageContextInfo = null;
+      showToast('⏳ 正在复制图片...', 1200);
+      copyImageBlobToClipboard(imageInfo.src).then(function () {
+        showToast('✅ 图片已复制到剪贴板', 2500);
+      }).catch(function () {
+        showToast('⚠️ 复制图片失败，可尝试右键后“打开图片”', 3000);
+      });
+    }, true);
+
+    menu.appendChild(item);
+  }
+
+  function tryInjectImageMenu() {
+    if (!pendingImageContextInfo) return;
+    var menus = document.querySelectorAll('[role="menu"], .ud__menu-normal-root, .ud__menu-normal');
+    for (var i = menus.length - 1; i >= 0; i--) {
+      var menu = menus[i];
+      var text = (menu.innerText || '');
+      if (text.indexOf('上传日志') !== -1 && text.indexOf('联系客服') !== -1) continue;
+      injectImageMenuItem(menu);
+      return;
+    }
+  }
+
+  document.addEventListener('contextmenu', function (e) {
+    pendingImageContextInfo = getImageInfoFromTarget(e.target);
+    setTimeout(tryInjectImageMenu, 0);
+    setTimeout(tryInjectImageMenu, 120);
+  }, true);
+
+  var imageMenuObserver = new MutationObserver(function () {
+    tryInjectImageMenu();
+  });
+
+  imageMenuObserver.observe(document.documentElement, {
+    childList: true,
+    subtree: true,
+  });
+
+  document.addEventListener('click', function () {
+    pendingImageContextInfo = null;
+  }, true);
+  document.addEventListener('keydown', function (e) {
+    if (e.key === 'Escape') pendingImageContextInfo = null;
+  }, true);
+
   document.addEventListener('keydown', function (e) {
     if (!e.metaKey || !e.shiftKey) return;
     var k = e.key.toLowerCase();
@@ -750,6 +987,10 @@
       e.preventDefault();
       e.stopImmediatePropagation();
       duplicateDocument();
+    } else if (k === 'h') {
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      exportDocumentAsHtml();
     } else if (k === 'p') {
       e.preventDefault();
       e.stopImmediatePropagation();
@@ -768,6 +1009,7 @@
 
   window.__feishuExtractFullDoc = extractFullDoc;
   window.__feishuDuplicateDoc = duplicateDocument;
+  window.__feishuPasteIntoDoc = pasteIntoDoc;
   window.__feishuDebugEquations = function () {
     var ss = getStructService();
     if (!ss || !ss.rootBlock) { console.log('no rootBlock'); return; }
