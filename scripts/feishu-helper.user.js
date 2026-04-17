@@ -125,6 +125,8 @@
     };
   }
 
+  var pendingPaste = null;
+
   function duplicateDocument() {
     var token = getDocToken();
     if (!token) {
@@ -145,6 +147,8 @@
     var title = document.querySelector('title');
     var docTitle = title ? title.textContent.replace(/ - 飞书云文档$/, '').replace(/ - Lark$/, '') : '副本';
 
+    pendingPaste = { html: content.html, text: content.text, title: docTitle };
+
     var html = '<!DOCTYPE html><html><head><meta charset="utf-8"><title>' + docTitle + '</title></head><body>' + content.html + '</body></html>';
 
     var blob = new Blob([html], { type: 'text/html' });
@@ -156,23 +160,63 @@
     navigator.clipboard.write([clipboardItem]).then(function () {
       if (btn) btn.textContent = '创建副本';
 
-      var baseUrl = location.origin;
-      var newDocUrl = baseUrl + '/drive/home/?create=docx';
-
-      var w = window.open(newDocUrl, '_blank');
-
       var notice = document.createElement('div');
-      notice.style.cssText = 'position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);background:#fff;padding:24px 32px;border-radius:12px;box-shadow:0 4px 24px rgba(0,0,0,0.2);z-index:999999;text-align:center;max-width:400px;';
+      notice.style.cssText = 'position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);background:#fff;padding:24px 32px;border-radius:12px;box-shadow:0 4px 24px rgba(0,0,0,0.2);z-index:999999;text-align:center;max-width:420px;';
       notice.innerHTML =
         '<div style="font-size:24px;margin-bottom:8px;">✅</div>' +
         '<div style="font-size:16px;font-weight:bold;margin-bottom:8px;">文档内容已复制到剪贴板</div>' +
-        '<div style="font-size:14px;color:#666;margin-bottom:16px;">已在新标签页打开空白文档，请按 <kbd style="background:#f0f0f0;padding:2px 6px;border-radius:4px;border:1px solid #ccc;">Cmd+V</kbd> 粘贴内容</div>' +
+        '<div style="font-size:14px;color:#666;margin-bottom:16px;text-align:left;line-height:1.8;">' +
+        '接下来请：<br>' +
+        '1. 手动新建一个飞书文档<br>' +
+        '2. 打开空白文档<br>' +
+        '3. 按 <kbd style="background:#f0f0f0;padding:2px 6px;border-radius:4px;border:1px solid #ccc;">Cmd+V</kbd> 粘贴内容<br><br>' +
+        '或者在空白文档中点击右下角的 <b>粘贴副本</b> 按钮</div>' +
         '<button style="background:#3370ff;color:#fff;border:none;padding:8px 24px;border-radius:6px;cursor:pointer;" onclick="this.parentElement.remove()">知道了</button>';
       document.body.appendChild(notice);
 
     }).catch(function () {
       if (btn) btn.textContent = '创建副本';
       downloadAsHTML(docTitle, content);
+    });
+  }
+
+  function pasteIntoDoc() {
+    if (!pendingPaste) {
+      alert('请先在源文档页面点击"创建副本"');
+      return;
+    }
+
+    var content = pendingPaste;
+    var html = '<!DOCTYPE html><html><head><meta charset="utf-8"><title>' + content.title + '</title></head><body>' + content.html + '</body></html>';
+
+    var blob = new Blob([html], { type: 'text/html' });
+    var clipboardItem = new ClipboardItem({
+      'text/html': blob,
+      'text/plain': new Blob([content.text], { type: 'text/plain' }),
+    });
+
+    navigator.clipboard.write([clipboardItem]).then(function () {
+      var editorEl = document.querySelector('[data-content-editable-root="true"]') ||
+                     document.querySelector('.doc-content') ||
+                     document.querySelector('[class*="editor"]');
+
+      if (editorEl) {
+        editorEl.focus();
+      }
+
+      document.execCommand('paste');
+
+      var notice = document.createElement('div');
+      notice.style.cssText = 'position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);background:#fff;padding:24px 32px;border-radius:12px;box-shadow:0 4px 24px rgba(0,0,0,0.2);z-index:999999;text-align:center;max-width:400px;';
+      notice.innerHTML =
+        '<div style="font-size:24px;margin-bottom:8px;">📋</div>' +
+        '<div style="font-size:16px;font-weight:bold;margin-bottom:8px;">内容已写入剪贴板</div>' +
+        '<div style="font-size:14px;color:#666;margin-bottom:16px;">如果未自动粘贴，请按 <kbd style="background:#f0f0f0;padding:2px 6px;border-radius:4px;border:1px solid #ccc;">Cmd+V</kbd> 手动粘贴</div>' +
+        '<button style="background:#3370ff;color:#fff;border:none;padding:8px 24px;border-radius:6px;cursor:pointer;" onclick="this.parentElement.remove()">知道了</button>';
+      document.body.appendChild(notice);
+
+    }).catch(function () {
+      alert('写入剪贴板失败，请手动 Cmd+V 粘贴');
     });
   }
 
@@ -193,17 +237,29 @@
   }
 
   function createFloatingButton() {
-    if (document.getElementById('__feishu_duplicate_btn__')) return;
+    if (document.getElementById('__feishu_toolbar__')) return;
 
     var container = document.createElement('div');
     container.id = '__feishu_toolbar__';
     container.style.cssText = 'position:fixed;bottom:24px;right:24px;z-index:999998;display:flex;flex-direction:column;gap:8px;';
 
-    var dupBtn = document.createElement('button');
-    dupBtn.id = '__feishu_duplicate_btn__';
-    dupBtn.textContent = '创建副本';
-    dupBtn.style.cssText = 'background:#3370ff;color:#fff;border:none;padding:10px 16px;border-radius:8px;cursor:pointer;font-size:14px;box-shadow:0 2px 8px rgba(0,0,0,0.2);white-space:nowrap;';
-    dupBtn.onclick = duplicateDocument;
+    if (pendingPaste) {
+      var pasteBtn = document.createElement('button');
+      pasteBtn.id = '__feishu_paste_btn__';
+      pasteBtn.textContent = '粘贴副本';
+      pasteBtn.style.cssText = 'background:#00b578;color:#fff;border:none;padding:10px 16px;border-radius:8px;cursor:pointer;font-size:14px;box-shadow:0 2px 8px rgba(0,0,0,0.2);white-space:nowrap;';
+      pasteBtn.onclick = pasteIntoDoc;
+      container.appendChild(pasteBtn);
+    }
+
+    if (getDocToken()) {
+      var dupBtn = document.createElement('button');
+      dupBtn.id = '__feishu_duplicate_btn__';
+      dupBtn.textContent = '创建副本';
+      dupBtn.style.cssText = 'background:#3370ff;color:#fff;border:none;padding:10px 16px;border-radius:8px;cursor:pointer;font-size:14px;box-shadow:0 2px 8px rgba(0,0,0,0.2);white-space:nowrap;';
+      dupBtn.onclick = duplicateDocument;
+      container.appendChild(dupBtn);
+    }
 
     var imgBtn = document.createElement('button');
     imgBtn.id = '__feishu_img_btn__';
@@ -224,9 +280,7 @@
   }
 
   document.addEventListener('DOMContentLoaded', function () {
-    if (getDocToken()) {
-      setTimeout(createFloatingButton, 2000);
-    }
+    setTimeout(createFloatingButton, 2000);
   });
 
   function extractImages() {
