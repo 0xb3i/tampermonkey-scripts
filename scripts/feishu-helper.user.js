@@ -205,9 +205,28 @@
     return decodeFeishuAttribs(attribs, text, numToAttrib);
   }
 
-  function blockToHtml(snap, blockId) {
+  var EMOJI_MAP = {
+    'purple_heart': '💜', 'star': '⭐', 'sparkler': '🎇', 'fire': '🔥',
+    'light_bulb': '💡', 'warning': '⚠️', 'memo': '📝', 'check_box_with_check': '✅',
+    'exclamation': '❗', 'question': '❓', 'rocket': '🚀', 'gear': '⚙️',
+    'book': '📖', 'pin': '📌', 'clipboard': '📋', 'trophy': '🏆',
+    'thumbs_up': '👍', 'thumbs_down': '👎', 'heart': '❤️', 'boom': '💥',
+    'sun': '☀️', 'rainbow': '🌈', 'key': '🔑', 'lock': '🔒',
+  };
+
+  function getEmoji(emojiId) {
+    return EMOJI_MAP[emojiId] || '';
+  }
+
+  var CONTAINER_TYPES = {
+    'callout': true, 'quote_container': true, 'grid': true,
+    'grid_column': true, 'table': true, 'table_cell': true,
+  };
+
+  function blockToHtml(snap, block, childHtmlArr) {
     var type = snap.type;
     var text = decodeBlockText(snap);
+    var childHtml = childHtmlArr ? childHtmlArr.join('\n') : '';
 
     switch (type) {
       case 'heading1': return '<h1>' + text + '</h1>';
@@ -223,26 +242,105 @@
       case 'ordered': return '<li>' + text + '</li>';
       case 'bullet': return '<li>' + text + '</li>';
       case 'todo': return '<li>' + (snap.checked ? '☑' : '☐') + ' ' + text + '</li>';
-      case 'quote': return '<blockquote>' + text + '</blockquote>';
-      case 'callout': return '<blockquote>' + text + '</blockquote>';
       case 'divider': return '<hr>';
       case 'code':
         var lang = (snap.language || snap.lang || '').replace(/^plain_text$/, '');
         return '<pre><code' + (lang ? ' class="language-' + lang + '"' : '') + '>' + text + '</code></pre>';
       case 'image':
         var imgToken = snap.image && snap.image.token;
-        var imgSrc = imgToken ? '/space/api/box/stream/download/all/' + imgToken + '/' : '';
-        return '<figure><img src="' + imgSrc + '" alt="' + (snap.image && snap.image.name || '') + '" /></figure>';
+        var imgSrc = imgToken ? 'https://internal-api-drive-stream.feishu.cn/space/api/box/stream/download/all/' + imgToken + '/' : '';
+        var imgAlt = (snap.image && snap.image.name) || '';
+        var caption = '';
+        if (snap.image && snap.image.caption && snap.image.caption.text) {
+          var capText = decodeBlockText({ text: snap.image.caption.text });
+          if (capText) caption = '<figcaption>' + capText + '</figcaption>';
+        }
+        return '<figure><img src="' + imgSrc + '" alt="' + imgAlt + '" />' + caption + '</figure>';
+      case 'callout':
+        var emoji = getEmoji(snap.emoji_id);
+        var bgColor = snap.background_color || '';
+        var style = bgColor ? ' style="background:' + bgColor + ';padding:12px 16px;border-radius:8px;"' : '';
+        return '<div class="callout"' + style + '>' + (emoji ? '<span>' + emoji + '</span> ' : '') + childHtml + '</div>';
+      case 'quote_container':
+        return '<blockquote>' + childHtml + '</blockquote>';
+      case 'grid':
+        return '<div style="display:flex;gap:12px;">' + childHtml + '</div>';
+      case 'grid_column':
+        var w = snap.width_ratio ? (snap.width_ratio * 100).toFixed(1) : '50';
+        return '<div style="flex:' + w + '%;">' + childHtml + '</div>';
       case 'table':
-        return '<table>' + text + '</table>';
+        return tableToHtml(snap, block);
+      case 'table_cell':
+        return childHtml || '<p></p>';
+      case 'diagram':
+        return '<p>[流程图]</p>';
+      case 'whiteboard':
+        return '<p>[白板]</p>';
+      case 'synced_reference':
+        return '<p>[引用块]</p>';
       default:
         return text ? '<p>' + text + '</p>' : '';
     }
   }
 
-  function blockToMarkdown(snap) {
+  function tableToHtml(snap, block) {
+    var rows = snap.rows_id || [];
+    var cols = snap.columns_id || [];
+    var cellSet = snap.cell_set || {};
+
+    if (!rows.length || !cols.length) return '';
+
+    var blockMap = {};
+    if (block.children && Array.isArray(block.children)) {
+      block.children.forEach(function(c) {
+        if (c.record && c.record.id) blockMap[c.record.id] = c;
+      });
+    }
+
+    var html = '<table border="1" cellpadding="6" cellspacing="0" style="border-collapse:collapse;">';
+    html += '<thead><tr>';
+    html += '<th></th>';
+    for (var ci = 0; ci < cols.length; ci++) {
+      html += '<th>列' + (ci + 1) + '</th>';
+    }
+    html += '</tr></thead><tbody>';
+
+    for (var ri = 0; ri < rows.length; ri++) {
+      html += '<tr>';
+      for (var cj = 0; cj < cols.length; cj++) {
+        var cellKey = rows[ri] + cols[cj];
+        var cellInfo = cellSet[cellKey];
+        var cellContent = '';
+
+        if (cellInfo && cellInfo.block_id) {
+          var cellBlock = blockMap[cellInfo.block_id];
+          if (cellBlock) {
+            var cellChildHtml = [];
+            if (cellBlock.children && Array.isArray(cellBlock.children)) {
+              cellBlock.children.forEach(function(gc) {
+                if (gc.record && gc.record.snapshot) {
+                  var gcText = decodeBlockText(gc.record.snapshot);
+                  if (gcText) cellChildHtml.push(gcText);
+                }
+              });
+            }
+            cellContent = cellChildHtml.join('<br>');
+          }
+        }
+
+        html += '<td>' + cellContent + '</td>';
+      }
+      html += '</tr>';
+    }
+
+    html += '</tbody></table>';
+    return html;
+  }
+
+  function blockToMarkdown(snap, block, childMdArr) {
     var type = snap.type;
     var text = decodeBlockText(snap);
+    var childMd = childMdArr ? childMdArr.join('\n') : '';
 
     switch (type) {
       case 'heading1': return '# ' + text;
@@ -258,17 +356,86 @@
       case 'ordered': return '1. ' + text;
       case 'bullet': return '- ' + text;
       case 'todo': return (snap.checked ? '[x]' : '[ ]') + ' ' + text;
-      case 'quote': return '> ' + text;
-      case 'callout': return '> ' + text;
       case 'divider': return '---';
       case 'code':
         var lang = (snap.language || snap.lang || '').replace(/^plain_text$/, '');
         return '```' + lang + '\n' + text + '\n```';
       case 'image':
         return '![' + (snap.image && snap.image.name || '') + '](' + (snap.image && snap.image.token || '') + ')';
+      case 'callout':
+        var emoji = getEmoji(snap.emoji_id);
+        return (emoji ? emoji + ' ' : '') + childMd.split('\n').map(function(l) { return '> ' + l; }).join('\n');
+      case 'quote_container':
+        return childMd.split('\n').map(function(l) { return '> ' + l; }).join('\n');
+      case 'grid':
+        return childMd;
+      case 'grid_column':
+        return childMd;
+      case 'table':
+        return tableToMarkdown(snap, block);
+      case 'table_cell':
+        return childMd;
+      case 'diagram':
+        return '[流程图]';
+      case 'whiteboard':
+        return '[白板]';
+      case 'synced_reference':
+        return '[引用块]';
       default:
         return text;
     }
+  }
+
+  function tableToMarkdown(snap, block) {
+    var rows = snap.rows_id || [];
+    var cols = snap.columns_id || [];
+    var cellSet = snap.cell_set || {};
+
+    if (!rows.length || !cols.length) return '';
+
+    var blockMap = {};
+    if (block.children && Array.isArray(block.children)) {
+      block.children.forEach(function(c) {
+        if (c.record && c.record.id) blockMap[c.record.id] = c;
+      });
+    }
+
+    var tableData = [];
+    for (var ri = 0; ri < rows.length; ri++) {
+      var row = [];
+      for (var ci = 0; ci < cols.length; ci++) {
+        var cellKey = rows[ri] + cols[ci];
+        var cellInfo = cellSet[cellKey];
+        var cellContent = '';
+
+        if (cellInfo && cellInfo.block_id) {
+          var cellBlock = blockMap[cellInfo.block_id];
+          if (cellBlock) {
+            var cellTexts = [];
+            if (cellBlock.children && Array.isArray(cellBlock.children)) {
+              cellBlock.children.forEach(function(gc) {
+                if (gc.record && gc.record.snapshot) {
+                  var gcText = decodeBlockText(gc.record.snapshot);
+                  if (gcText) cellTexts.push(gcText);
+                }
+              });
+            }
+            cellContent = cellTexts.join(' ');
+          }
+        }
+
+        row.push(cellContent.replace(/\|/g, '\\|').replace(/\n/g, ' '));
+      }
+      tableData.push(row);
+    }
+
+    var md = '| ' + cols.map(function(_, i) { return '列' + (i + 1); }).join(' | ') + ' |\n';
+    md += '| ' + cols.map(function() { return '---'; }).join(' | ') + ' |\n';
+    tableData.forEach(function(row) {
+      md += '| ' + row.join(' | ') + ' |\n';
+    });
+
+    return md.trim();
   }
 
   function extractFullDoc() {
@@ -287,24 +454,69 @@
         var type = snap.type;
 
         if (type === 'page') {
-          // skip root page block
-        } else {
-          var decoded = decodeBlockText(snap);
-          if (decoded.includes('$')) equationCount++;
-
-          var html = blockToHtml(snap, block.record.id);
-          var md = blockToMarkdown(snap);
-
-          if (html) htmlParts.push(html);
-          if (md) mdParts.push(md);
-          blockCount++;
+          if (block.children && Array.isArray(block.children)) {
+            for (var i = 0; i < block.children.length; i++) {
+              processBlock(block.children[i], depth + 1);
+            }
+          }
+          return;
         }
+
+        var childHtmlArr = [];
+        var childMdArr = [];
+
+        if (CONTAINER_TYPES[type] && block.children && Array.isArray(block.children)) {
+          for (var ci = 0; ci < block.children.length; ci++) {
+            var childResult = processBlockInner(block.children[ci], depth + 1);
+            if (childResult) {
+              if (childResult.html) childHtmlArr.push(childResult.html);
+              if (childResult.md) childMdArr.push(childResult.md);
+            }
+          }
+        }
+
+        var decoded = decodeBlockText(snap);
+        if (decoded.includes('$')) equationCount++;
+
+        var html = blockToHtml(snap, block, childHtmlArr);
+        var md = blockToMarkdown(snap, block, childMdArr);
+
+        if (html) htmlParts.push(html);
+        if (md) mdParts.push(md);
+        blockCount++;
+        return;
       }
       if (block.children && Array.isArray(block.children)) {
         for (var i = 0; i < block.children.length; i++) {
           processBlock(block.children[i], depth + 1);
         }
       }
+    }
+
+    function processBlockInner(block, depth) {
+      if (!block || depth > 12) return null;
+      if (!block.record || !block.record.snapshot) return null;
+
+      var snap = block.record.snapshot;
+      var type = snap.type;
+
+      var childHtmlArr = [];
+      var childMdArr = [];
+
+      if (CONTAINER_TYPES[type] && block.children && Array.isArray(block.children)) {
+        for (var ci = 0; ci < block.children.length; ci++) {
+          var childResult = processBlockInner(block.children[ci], depth + 1);
+          if (childResult) {
+            if (childResult.html) childHtmlArr.push(childResult.html);
+            if (childResult.md) childMdArr.push(childResult.md);
+          }
+        }
+      }
+
+      var html = blockToHtml(snap, block, childHtmlArr);
+      var md = blockToMarkdown(snap, block, childMdArr);
+
+      return { html: html, md: md };
     }
 
     processBlock(ss.rootBlock, 0);
