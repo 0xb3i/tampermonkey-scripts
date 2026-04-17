@@ -148,36 +148,17 @@
     var docTitle = title ? title.textContent.replace(/ - 飞书云文档$/, '').replace(/ - Lark$/, '') : '副本';
 
     pendingPaste = { html: content.html, text: content.text, title: docTitle };
+    if (btn) btn.textContent = '已提取 ✓';
 
-    var html = '<!DOCTYPE html><html><head><meta charset="utf-8"><title>' + docTitle + '</title></head><body>' + content.html + '</body></html>';
-
-    var blob = new Blob([html], { type: 'text/html' });
-    var clipboardItem = new ClipboardItem({
-      'text/html': blob,
-      'text/plain': new Blob([content.text], { type: 'text/plain' }),
-    });
-
-    navigator.clipboard.write([clipboardItem]).then(function () {
-      if (btn) btn.textContent = '创建副本';
-
-      var notice = document.createElement('div');
-      notice.style.cssText = 'position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);background:#fff;padding:24px 32px;border-radius:12px;box-shadow:0 4px 24px rgba(0,0,0,0.2);z-index:999999;text-align:center;max-width:420px;';
-      notice.innerHTML =
-        '<div style="font-size:24px;margin-bottom:8px;">✅</div>' +
-        '<div style="font-size:16px;font-weight:bold;margin-bottom:8px;">文档内容已复制到剪贴板</div>' +
-        '<div style="font-size:14px;color:#666;margin-bottom:16px;text-align:left;line-height:1.8;">' +
-        '接下来请：<br>' +
-        '1. 手动新建一个飞书文档<br>' +
-        '2. 打开空白文档<br>' +
-        '3. 按 <kbd style="background:#f0f0f0;padding:2px 6px;border-radius:4px;border:1px solid #ccc;">Cmd+V</kbd> 粘贴内容<br><br>' +
-        '或者在空白文档中点击右下角的 <b>粘贴副本</b> 按钮</div>' +
-        '<button style="background:#3370ff;color:#fff;border:none;padding:8px 24px;border-radius:6px;cursor:pointer;" onclick="this.parentElement.remove()">知道了</button>';
-      document.body.appendChild(notice);
-
-    }).catch(function () {
-      if (btn) btn.textContent = '创建副本';
-      downloadAsHTML(docTitle, content);
-    });
+    showNotice(
+      '✅',
+      '文档内容已提取',
+      '接下来请：<br>' +
+      '1. 手动新建一个飞书文档<br>' +
+      '2. 打开空白文档<br>' +
+      '3. 点击右下角绿色的 <b>粘贴副本</b> 按钮<br><br>' +
+      '内容会在新文档页面写入剪贴板，然后按 Cmd+V 粘贴即可'
+    );
   }
 
   function pasteIntoDoc() {
@@ -196,27 +177,37 @@
     });
 
     navigator.clipboard.write([clipboardItem]).then(function () {
-      var editorEl = document.querySelector('[data-content-editable-root="true"]') ||
-                     document.querySelector('.doc-content') ||
-                     document.querySelector('[class*="editor"]');
-
-      if (editorEl) {
-        editorEl.focus();
-      }
-
-      document.execCommand('paste');
-
-      var notice = document.createElement('div');
-      notice.style.cssText = 'position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);background:#fff;padding:24px 32px;border-radius:12px;box-shadow:0 4px 24px rgba(0,0,0,0.2);z-index:999999;text-align:center;max-width:400px;';
-      notice.innerHTML =
-        '<div style="font-size:24px;margin-bottom:8px;">📋</div>' +
-        '<div style="font-size:16px;font-weight:bold;margin-bottom:8px;">内容已写入剪贴板</div>' +
-        '<div style="font-size:14px;color:#666;margin-bottom:16px;">如果未自动粘贴，请按 <kbd style="background:#f0f0f0;padding:2px 6px;border-radius:4px;border:1px solid #ccc;">Cmd+V</kbd> 手动粘贴</div>' +
-        '<button style="background:#3370ff;color:#fff;border:none;padding:8px 24px;border-radius:6px;cursor:pointer;" onclick="this.parentElement.remove()">知道了</button>';
-      document.body.appendChild(notice);
-
+      showNotice(
+        '📋',
+        '内容已写入剪贴板',
+        '请按 <kbd style="background:#f0f0f0;padding:2px 6px;border-radius:4px;border:1px solid #ccc;">Cmd+V</kbd> 粘贴到文档中'
+      );
     }).catch(function () {
-      alert('写入剪贴板失败，请手动 Cmd+V 粘贴');
+      showNotice(
+        '⚠️',
+        '写入剪贴板失败',
+        '请手动复制：全选下方内容 → Cmd+C → 切换到文档 → Cmd+V'
+      );
+    });
+  }
+
+  function showNotice(icon, title, message) {
+    var existing = document.getElementById('__feishu_notice__');
+    if (existing) existing.remove();
+
+    var notice = document.createElement('div');
+    notice.id = '__feishu_notice__';
+    notice.style.cssText = 'position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);background:#fff;padding:24px 32px;border-radius:12px;box-shadow:0 4px 24px rgba(0,0,0,0.2);z-index:9999999;text-align:center;max-width:420px;';
+    notice.innerHTML =
+      '<div style="font-size:24px;margin-bottom:8px;">' + icon + '</div>' +
+      '<div style="font-size:16px;font-weight:bold;margin-bottom:8px;">' + title + '</div>' +
+      '<div style="font-size:14px;color:#666;margin-bottom:16px;text-align:left;line-height:1.8;">' + message + '</div>' +
+      '<button id="__feishu_notice_close__" style="background:#3370ff;color:#fff;border:none;padding:8px 24px;border-radius:6px;cursor:pointer;font-size:14px;">知道了</button>';
+    document.body.appendChild(notice);
+
+    document.getElementById('__feishu_notice_close__').addEventListener('click', function (e) {
+      e.stopPropagation();
+      notice.remove();
     });
   }
 
