@@ -99,6 +99,32 @@
     return match ? decodeURIComponent(match[1]) : '';
   }
 
+  function getDocContent() {
+    var contentEl = document.querySelector('[data-content-editable-root="true"]') ||
+                    document.querySelector('.doc-content') ||
+                    document.querySelector('.docx-container') ||
+                    document.querySelector('[class*="doc-content"]') ||
+                    document.querySelector('[class*="editor"]');
+
+    if (!contentEl) return null;
+
+    var clone = contentEl.cloneNode(true);
+    clone.querySelectorAll('script, style').forEach(function (el) { el.remove(); });
+    clone.querySelectorAll('[contenteditable]').forEach(function (el) { el.removeAttribute('contenteditable'); });
+    clone.querySelectorAll('[class]').forEach(function (el) {
+      var keep = [];
+      el.classList.forEach(function (c) {
+        if (/katex|math|mjx|image|img|table|code-block|heading|list|quote/.test(c)) keep.push(c);
+      });
+      el.className = keep.join(' ');
+    });
+
+    return {
+      html: clone.innerHTML,
+      text: contentEl.innerText,
+    };
+  }
+
   function duplicateDocument() {
     var token = getDocToken();
     if (!token) {
@@ -106,94 +132,56 @@
       return;
     }
 
-    var baseUrl = getBaseUrl();
-    var csrfToken = getCsrfToken();
-
     var btn = document.getElementById('__feishu_duplicate_btn__');
-    if (btn) btn.textContent = '复制中...';
+    if (btn) btn.textContent = '提取中...';
 
-    fetch(baseUrl + '/api/v2/docx/' + token + '/copy', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'X-Csrf-Token': csrfToken,
-      },
-      credentials: 'include',
-      body: JSON.stringify({}),
-    })
-    .then(function (res) { return res.json(); })
-    .then(function (data) {
+    var content = getDocContent();
+    if (!content) {
       if (btn) btn.textContent = '创建副本';
-
-      if (data.code === 0 && data.data && data.data.document_id) {
-        var newUrl = baseUrl + '/docx/' + data.data.document_id;
-        window.open(newUrl, '_blank');
-      } else if (data.code === 0 && data.data && data.data.node_token) {
-        var newUrl2 = baseUrl + '/docx/' + data.data.node_token;
-        window.open(newUrl2, '_blank');
-      } else {
-        tryAlternativeAPIs(token, baseUrl, csrfToken, btn);
-      }
-    })
-    .catch(function () {
-      tryAlternativeAPIs(token, baseUrl, csrfToken, btn);
-    });
-  }
-
-  function tryAlternativeAPIs(token, baseUrl, csrfToken, btn) {
-    fetch(baseUrl + '/doc/api/create_shortcut', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'X-Csrf-Token': csrfToken,
-      },
-      credentials: 'include',
-      body: JSON.stringify({
-        obj_token: token,
-        obj_type: 'docx',
-        is_copy: true,
-      }),
-    })
-    .then(function (res) { return res.json(); })
-    .then(function (data) {
-      if (btn) btn.textContent = '创建副本';
-
-      if (data.code === 0 && data.data && data.data.token) {
-        window.open(baseUrl + '/docx/' + data.data.token, '_blank');
-      } else if (data.code === 0 && data.data && data.data.url) {
-        window.open(data.data.url, '_blank');
-      } else {
-        fallbackDOMCopy();
-      }
-    })
-    .catch(function () {
-      if (btn) btn.textContent = '创建副本';
-      fallbackDOMCopy();
-    });
-  }
-
-  function fallbackDOMCopy() {
-    var title = document.querySelector('title');
-    var docTitle = title ? title.textContent.replace(/ - 飞书云文档$/, '') : '副本';
-
-    var contentEl = document.querySelector('[data-content-editable-root="true"]') ||
-                    document.querySelector('.doc-content') ||
-                    document.querySelector('.docx-container') ||
-                    document.querySelector('[class*="doc-content"]') ||
-                    document.querySelector('[class*="editor"]');
-
-    if (!contentEl) {
-      alert('无法提取文档内容，请尝试手动复制');
+      alert('无法提取文档内容');
       return;
     }
 
-    var html = contentEl.innerHTML;
-    var blob = new Blob([
-      '<!DOCTYPE html><html><head><meta charset="utf-8"><title>' + docTitle + ' (副本)</title>' +
-      '<style>body{font-family:-apple-system,sans-serif;max-width:800px;margin:40px auto;padding:0 20px;line-height:1.8;}img{max-width:100%;}table{border-collapse:collapse;width:100%;}td,th{border:1px solid #ddd;padding:8px;}</style>' +
-      '</head><body><h1>' + docTitle + ' (副本)</h1>' + html + '</body></html>'
-    ], { type: 'text/html' });
+    var title = document.querySelector('title');
+    var docTitle = title ? title.textContent.replace(/ - 飞书云文档$/, '').replace(/ - Lark$/, '') : '副本';
 
+    var html = '<!DOCTYPE html><html><head><meta charset="utf-8"><title>' + docTitle + '</title></head><body>' + content.html + '</body></html>';
+
+    var blob = new Blob([html], { type: 'text/html' });
+    var clipboardItem = new ClipboardItem({
+      'text/html': blob,
+      'text/plain': new Blob([content.text], { type: 'text/plain' }),
+    });
+
+    navigator.clipboard.write([clipboardItem]).then(function () {
+      if (btn) btn.textContent = '创建副本';
+
+      var baseUrl = location.origin;
+      var newDocUrl = baseUrl + '/docx/new';
+
+      var w = window.open(newDocUrl, '_blank');
+
+      var notice = document.createElement('div');
+      notice.style.cssText = 'position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);background:#fff;padding:24px 32px;border-radius:12px;box-shadow:0 4px 24px rgba(0,0,0,0.2);z-index:999999;text-align:center;max-width:400px;';
+      notice.innerHTML =
+        '<div style="font-size:24px;margin-bottom:8px;">✅</div>' +
+        '<div style="font-size:16px;font-weight:bold;margin-bottom:8px;">文档内容已复制到剪贴板</div>' +
+        '<div style="font-size:14px;color:#666;margin-bottom:16px;">已在新标签页打开空白文档，请按 <kbd style="background:#f0f0f0;padding:2px 6px;border-radius:4px;border:1px solid #ccc;">Cmd+V</kbd> 粘贴内容</div>' +
+        '<button style="background:#3370ff;color:#fff;border:none;padding:8px 24px;border-radius:6px;cursor:pointer;" onclick="this.parentElement.remove()">知道了</button>';
+      document.body.appendChild(notice);
+
+    }).catch(function () {
+      if (btn) btn.textContent = '创建副本';
+      downloadAsHTML(docTitle, content);
+    });
+  }
+
+  function downloadAsHTML(docTitle, content) {
+    var html = '<!DOCTYPE html><html><head><meta charset="utf-8"><title>' + docTitle + ' (副本)</title>' +
+      '<style>body{font-family:-apple-system,sans-serif;max-width:800px;margin:40px auto;padding:0 20px;line-height:1.8;}img{max-width:100%;}table{border-collapse:collapse;width:100%;}td,th{border:1px solid #ddd;padding:8px;}pre{background:#f5f5f5;padding:12px;border-radius:6px;overflow-x:auto;}code{background:#f0f0f0;padding:2px 4px;border-radius:3px;}</style>' +
+      '</head><body>' + content.html + '</body></html>';
+
+    var blob = new Blob([html], { type: 'text/html' });
     var url = URL.createObjectURL(blob);
     var a = document.createElement('a');
     a.href = url;
@@ -201,7 +189,7 @@
     a.click();
     URL.revokeObjectURL(url);
 
-    alert('API 复制未成功，已导出为 HTML 文件。你可以手动将内容粘贴到新文档中。');
+    alert('已导出为 HTML 文件（飞书编辑器支持直接粘贴 HTML）。\n\n操作步骤：\n1. 打开一个新的飞书文档\n2. 用浏览器打开导出的 HTML 文件\n3. 全选复制 → 粘贴到飞书文档');
   }
 
   function createFloatingButton() {
