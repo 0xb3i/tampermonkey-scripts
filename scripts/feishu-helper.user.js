@@ -189,8 +189,15 @@
       case 'callout':
         var emoji = getEmoji(snap.emoji_id);
         var bgColor = snap.background_color || '';
-        var style = bgColor ? ' style="background:' + bgColor + ';padding:12px 16px;border-radius:8px;"' : '';
-        return '<div class="callout"' + style + '>' + (emoji ? '<span>' + emoji + '</span> ' : '') + childHtml + '</div>';
+        var borderColor = snap.border_color || '';
+        var containerStyle = '';
+        if (bgColor || borderColor) {
+          containerStyle = ' style="';
+          if (borderColor) containerStyle += 'border:1px solid ' + borderColor + ';';
+          if (bgColor) containerStyle += 'background:' + bgColor + ';';
+          containerStyle += 'padding:12px 16px;border-radius:8px;"';
+        }
+        return '<div class="callout-container"' + containerStyle + ' data-emoji-id="' + (snap.emoji_id || '') + '"><div class="callout-block">' + (emoji ? '<span>' + emoji + '</span> ' : '') + childHtml + '</div></div>';
       case 'quote_container':
         return '<blockquote>' + childHtml + '</blockquote>';
       case 'grid':
@@ -228,12 +235,6 @@
     }
 
     var html = '<table border="1" cellpadding="6" cellspacing="0" style="border-collapse:collapse;">';
-    html += '<thead><tr>';
-    html += '<th></th>';
-    for (var ci = 0; ci < cols.length; ci++) {
-      html += '<th>列' + (ci + 1) + '</th>';
-    }
-    html += '</tr></thead><tbody>';
 
     for (var ri = 0; ri < rows.length; ri++) {
       html += '<tr>';
@@ -263,7 +264,7 @@
       html += '</tr>';
     }
 
-    html += '</tbody></table>';
+    html += '</table>';
     return html;
   }
 
@@ -302,7 +303,7 @@
         return '![' + (snap.image && snap.image.name || '') + '](' + imgSrcMd + ')';
       case 'callout':
         var emoji = getEmoji(snap.emoji_id);
-        return (emoji ? emoji + ' ' : '') + childMd.split('\n').map(function(l) { return '> ' + l; }).join('\n');
+        return (emoji ? emoji + ' ' : '') + childMd;
       case 'quote_container':
         return childMd.split('\n').map(function(l) { return '> ' + l; }).join('\n');
       case 'grid':
