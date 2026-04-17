@@ -108,21 +108,85 @@
 
     if (!contentEl) return null;
 
+    annotateKatexInPlace(contentEl);
+
     var clone = contentEl.cloneNode(true);
     clone.querySelectorAll('script, style').forEach(function (el) { el.remove(); });
     clone.querySelectorAll('[contenteditable]').forEach(function (el) { el.removeAttribute('contenteditable'); });
+
+    replaceKatexInFragment(clone);
+
     clone.querySelectorAll('[class]').forEach(function (el) {
       var keep = [];
       el.classList.forEach(function (c) {
-        if (/katex|math|mjx|image|img|table|code-block|heading|list|quote/.test(c)) keep.push(c);
+        if (/image|img|table|code-block|heading|list|quote/.test(c)) keep.push(c);
       });
       el.className = keep.join(' ');
     });
 
     return {
       html: clone.innerHTML,
-      text: contentEl.innerText,
+      text: clone.innerText,
     };
+  }
+
+  function annotateKatexInPlace(root) {
+    var katexEls = root.querySelectorAll('.katex:not([data-latex]):not([data-latex-display])');
+    for (var i = 0; i < katexEls.length; i++) {
+      var el = katexEls[i];
+      var ann = el.querySelector('.katex-mathml annotation');
+      if (ann) {
+        var isDisplay = el.closest('.katex-display') !== null;
+        el.setAttribute(isDisplay ? 'data-latex-display' : 'data-latex', ann.textContent);
+      }
+    }
+  }
+
+  function replaceKatexInFragment(fragment) {
+    var katexEls = fragment.querySelectorAll('.katex');
+    for (var i = 0; i < katexEls.length; i++) {
+      var el = katexEls[i];
+      var latex = null;
+      var isDisplay = false;
+
+      if (el.hasAttribute('data-latex-display')) {
+        latex = el.getAttribute('data-latex-display');
+        isDisplay = true;
+      } else if (el.hasAttribute('data-latex')) {
+        latex = el.getAttribute('data-latex');
+      } else {
+        var ann = el.querySelector('.katex-mathml annotation');
+        if (ann) {
+          latex = ann.textContent;
+          isDisplay = el.closest('.katex-display') !== null;
+        }
+      }
+
+      if (latex !== null) {
+        var delimiters = isDisplay ? ['$$', '$$'] : [' $', '$ '];
+        var tex = delimiters[0] + latex + delimiters[1];
+        var textNode = document.createTextNode(tex);
+        if (el.replaceWith) { el.replaceWith(textNode); }
+        else if (el.parentNode) { el.parentNode.replaceChild(textNode, el); }
+      }
+    }
+
+    var mjxEls = fragment.querySelectorAll('mjx-container');
+    for (var j = 0; j < mjxEls.length; j++) {
+      var mjx = mjxEls[j];
+      var mathEl = mjx.querySelector('math');
+      if (mathEl) {
+        var ann2 = mathEl.querySelector('annotation');
+        if (ann2) {
+          var isDisplay2 = mjx.getAttribute('display') === 'true' || mjx.hasAttribute('display');
+          var delimiters2 = isDisplay2 ? ['$$', '$$'] : [' $', '$ '];
+          var tex2 = delimiters2[0] + ann2.textContent + delimiters2[1];
+          var textNode2 = document.createTextNode(tex2);
+          if (mjx.replaceWith) { mjx.replaceWith(textNode2); }
+          else if (mjx.parentNode) { mjx.parentNode.replaceChild(textNode2, mjx); }
+        }
+      }
+    }
   }
 
   function scrollAndExtract(callback) {
