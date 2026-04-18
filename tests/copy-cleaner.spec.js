@@ -178,4 +178,494 @@ test.describe('Copy Cleaner - copy event integration', () => {
       expect(clipboardText).toBe('Hello');
     }
   });
+
+  test('should preserve unordered list markers when manually copying cleaned text', async ({ page, context }) => {
+    await page.setContent(`
+      <!DOCTYPE html>
+      <html><body>
+        <div id="source" tabindex="0">
+          <ul>
+            <li>**第一项**（注释）</li>
+            <li>**第二项**（说明）</li>
+          </ul>
+        </div>
+      </body></html>
+    `);
+
+    await page.evaluate(coreScript);
+    await page.evaluate(() => {
+      window.__copiedText = null;
+      Object.defineProperty(navigator, 'clipboard', {
+        configurable: true,
+        value: {
+          writeText(text) {
+            window.__copiedText = text;
+            return Promise.resolve();
+          }
+        }
+      });
+    });
+
+    await page.focus('#source');
+    await page.evaluate(() => {
+      const selection = window.getSelection();
+      const range = document.createRange();
+      range.selectNodeContents(document.getElementById('source'));
+      selection.removeAllRanges();
+      selection.addRange(range);
+    });
+    await page.keyboard.press('Control+c');
+    await page.waitForTimeout(100);
+
+    const clipboardText = await page.evaluate(() => window.__copiedText);
+    expect(clipboardText).toBe('- 第一项\n- 第二项');
+  });
+
+  test('should preserve unordered list markers in copy event path', async ({ page }) => {
+    await page.setContent(`
+      <!DOCTYPE html>
+      <html><body>
+        <div id="source">
+          <ul>
+            <li>**第一项**（注释）</li>
+            <li>**第二项**（说明）</li>
+          </ul>
+        </div>
+      </body></html>
+    `);
+
+    await page.evaluate(coreScript);
+
+    const copiedText = await page.evaluate(() => {
+      const selection = window.getSelection();
+      const range = document.createRange();
+      range.selectNodeContents(document.getElementById('source'));
+      selection.removeAllRanges();
+      selection.addRange(range);
+
+      const dataTransfer = new DataTransfer();
+      const copyEvent = new Event('copy', { bubbles: true, cancelable: true });
+      Object.defineProperty(copyEvent, 'clipboardData', { value: dataTransfer });
+      document.dispatchEvent(copyEvent);
+      return dataTransfer.getData('text/plain');
+    });
+
+    expect(copiedText).toBe('- 第一项\n- 第二项');
+  });
+
+  test('should override site copy handler registered on window capture phase', async ({ page }) => {
+    await page.setContent(`
+      <!DOCTYPE html>
+      <html><body>
+        <div id="source">**第一项**（注释）</div>
+      </body></html>
+    `);
+
+    await page.evaluate(coreScript);
+    await page.evaluate(() => {
+      window.addEventListener('copy', function (e) {
+        e.preventDefault();
+        e.stopImmediatePropagation();
+        e.clipboardData.setData('text/plain', '**第一项**（注释）');
+      }, true);
+    });
+
+    const copiedText = await page.evaluate(() => {
+      const selection = window.getSelection();
+      const range = document.createRange();
+      range.selectNodeContents(document.getElementById('source'));
+      selection.removeAllRanges();
+      selection.addRange(range);
+
+      const dataTransfer = new DataTransfer();
+      const copyEvent = new Event('copy', { bubbles: true, cancelable: true });
+      Object.defineProperty(copyEvent, 'clipboardData', { value: dataTransfer });
+      document.dispatchEvent(copyEvent);
+      return dataTransfer.getData('text/plain');
+    });
+
+    expect(copiedText).toBe('第一项');
+  });
+
+  test('should keep surrounding text boundaries for unordered lists with latex', async ({ page }) => {
+    await page.setContent(`
+      <!DOCTYPE html>
+      <html><body>
+        <div id="source" tabindex="0">
+          导语
+          <ul>
+            <li>**公式** $x^2$（说明）</li>
+          </ul>
+          结尾
+        </div>
+      </body></html>
+    `);
+
+    await page.evaluate(coreScript);
+    await page.evaluate(() => {
+      window.__copiedText = null;
+      Object.defineProperty(navigator, 'clipboard', {
+        configurable: true,
+        value: {
+          writeText(text) {
+            window.__copiedText = text;
+            return Promise.resolve();
+          }
+        }
+      });
+    });
+
+    await page.focus('#source');
+    await page.evaluate(() => {
+      const selection = window.getSelection();
+      const range = document.createRange();
+      range.selectNodeContents(document.getElementById('source'));
+      selection.removeAllRanges();
+      selection.addRange(range);
+    });
+    await page.keyboard.press('Control+c');
+    await page.waitForTimeout(100);
+
+    const clipboardText = await page.evaluate(() => window.__copiedText);
+    expect(clipboardText).toContain('导语');
+    expect(clipboardText).toContain('- 公式 $x^2$');
+    expect(clipboardText).toContain('结尾');
+  });
+
+  test('should preserve multiple unordered latex list markers in order', async ({ page }) => {
+    await page.setContent(`
+      <!DOCTYPE html>
+      <html><body>
+        <div id="source" tabindex="0">
+          导语
+          <ul>
+            <li><span class="katex"><span class="katex-mathml"><math><semantics><annotation encoding="application/x-tex">x^2</annotation></semantics></math></span><span class="katex-html" aria-hidden="true">x^2</span></span> 第一项（注释）</li>
+            <li><span class="katex"><span class="katex-mathml"><math><semantics><annotation encoding="application/x-tex">y^2</annotation></semantics></math></span><span class="katex-html" aria-hidden="true">y^2</span></span> 第二项（说明）</li>
+          </ul>
+          结尾
+        </div>
+      </body></html>
+    `);
+
+    await page.evaluate(coreScript);
+    await page.evaluate(() => {
+      window.__copiedText = null;
+      Object.defineProperty(navigator, 'clipboard', {
+        configurable: true,
+        value: {
+          writeText(text) {
+            window.__copiedText = text;
+            return Promise.resolve();
+          }
+        }
+      });
+    });
+
+    await page.focus('#source');
+    await page.evaluate(() => {
+      const selection = window.getSelection();
+      const range = document.createRange();
+      range.selectNodeContents(document.getElementById('source'));
+      selection.removeAllRanges();
+      selection.addRange(range);
+    });
+    await page.keyboard.press('Control+c');
+    await page.waitForTimeout(100);
+
+    const clipboardText = await page.evaluate(() => window.__copiedText);
+    expect(clipboardText).toBe('导语\n- $x^2$ 第一项\n- $y^2$ 第二项\n结尾');
+  });
+
+  test('should preserve unordered list markers when surrounding text repeats list content', async ({ page }) => {
+    await page.setContent(`
+      <!DOCTYPE html>
+      <html><body>
+        <div id="source" tabindex="0">
+          第一项
+          <ul>
+            <li>**第一项**（注释）</li>
+            <li>**第二项**（说明）</li>
+          </ul>
+          第一项
+        </div>
+      </body></html>
+    `);
+
+    await page.evaluate(coreScript);
+    await page.evaluate(() => {
+      window.__copiedText = null;
+      Object.defineProperty(navigator, 'clipboard', {
+        configurable: true,
+        value: {
+          writeText(text) {
+            window.__copiedText = text;
+            return Promise.resolve();
+          }
+        }
+      });
+    });
+
+    await page.focus('#source');
+    await page.evaluate(() => {
+      const selection = window.getSelection();
+      const range = document.createRange();
+      range.selectNodeContents(document.getElementById('source'));
+      selection.removeAllRanges();
+      selection.addRange(range);
+    });
+    await page.keyboard.press('Control+c');
+    await page.waitForTimeout(100);
+
+    const clipboardText = await page.evaluate(() => window.__copiedText);
+    expect(clipboardText).toBe('第一项\n- 第一项\n- 第二项\n第一项');
+  });
+
+  test('should preserve simple ordered list numbering', async ({ page }) => {
+    await page.setContent(`
+      <!DOCTYPE html>
+      <html><body>
+        <div id="source" tabindex="0">
+          <ol>
+            <li>**第一项**（注释）</li>
+            <li>**第二项**（说明）</li>
+          </ol>
+        </div>
+      </body></html>
+    `);
+
+    await page.evaluate(coreScript);
+    await page.evaluate(() => {
+      window.__copiedText = null;
+      Object.defineProperty(navigator, 'clipboard', {
+        configurable: true,
+        value: {
+          writeText(text) {
+            window.__copiedText = text;
+            return Promise.resolve();
+          }
+        }
+      });
+    });
+
+    await page.focus('#source');
+    await page.evaluate(() => {
+      const selection = window.getSelection();
+      const range = document.createRange();
+      range.selectNodeContents(document.getElementById('source'));
+      selection.removeAllRanges();
+      selection.addRange(range);
+    });
+    await page.keyboard.press('Control+c');
+    await page.waitForTimeout(100);
+
+    const clipboardText = await page.evaluate(() => window.__copiedText);
+    expect(clipboardText).toBe('1. 第一项\n2. 第二项');
+  });
+
+  test('should preserve ordered list numbering when manually copying cleaned text', async ({ page }) => {
+    await page.setContent(`
+      <!DOCTYPE html>
+      <html><body>
+        <div id="source" tabindex="0">
+          <ol>
+            <li>**第一项**（注释）</li>
+            <li>**第二项**（说明）</li>
+            <li>**第三项**（备注）</li>
+          </ol>
+        </div>
+      </body></html>
+    `);
+
+    await page.evaluate(coreScript);
+    await page.evaluate(() => {
+      window.__copiedText = null;
+      Object.defineProperty(navigator, 'clipboard', {
+        configurable: true,
+        value: {
+          writeText(text) {
+            window.__copiedText = text;
+            return Promise.resolve();
+          }
+        }
+      });
+    });
+
+    await page.focus('#source');
+    await page.evaluate(() => {
+      const selection = window.getSelection();
+      const range = document.createRange();
+      range.selectNodeContents(document.getElementById('source'));
+      selection.removeAllRanges();
+      selection.addRange(range);
+    });
+    await page.keyboard.press('Control+c');
+    await page.waitForTimeout(100);
+
+    const clipboardText = await page.evaluate(() => window.__copiedText);
+    expect(clipboardText).toBe('1. 第一项\n2. 第二项\n3. 第三项');
+  });
+
+  test('should preserve ordered list numbering in copy event path', async ({ page }) => {
+    await page.setContent(`
+      <!DOCTYPE html>
+      <html><body>
+        <div id="source">
+          <ol>
+            <li>**第一项**（注释）</li>
+            <li>**第二项**（说明）</li>
+            <li>**第三项**（备注）</li>
+          </ol>
+        </div>
+      </body></html>
+    `);
+
+    await page.evaluate(coreScript);
+
+    const copiedText = await page.evaluate(() => {
+      const selection = window.getSelection();
+      const range = document.createRange();
+      range.selectNodeContents(document.getElementById('source'));
+      selection.removeAllRanges();
+      selection.addRange(range);
+
+      const dataTransfer = new DataTransfer();
+      const copyEvent = new Event('copy', { bubbles: true, cancelable: true });
+      Object.defineProperty(copyEvent, 'clipboardData', { value: dataTransfer });
+      document.dispatchEvent(copyEvent);
+      return dataTransfer.getData('text/plain');
+    });
+
+    expect(copiedText).toBe('1. 第一项\n2. 第二项\n3. 第三项');
+  });
+
+  test('should preserve ordered latex list numbering without blank lines', async ({ page }) => {
+    await page.setContent(`
+      <!DOCTYPE html>
+      <html><body>
+        <div id="source" tabindex="0">
+          导语
+          <ol start="2">
+            <li><span class="katex"><span class="katex-mathml"><math><semantics><annotation encoding="application/x-tex">x^2</annotation></semantics></math></span><span class="katex-html" aria-hidden="true">x^2</span></span> 第一项（注释）</li>
+            <li><span class="katex"><span class="katex-mathml"><math><semantics><annotation encoding="application/x-tex">y^2</annotation></semantics></math></span><span class="katex-html" aria-hidden="true">y^2</span></span> 第二项（说明）</li>
+          </ol>
+          结尾
+        </div>
+      </body></html>
+    `);
+
+    await page.evaluate(coreScript);
+    await page.evaluate(() => {
+      window.__copiedText = null;
+      Object.defineProperty(navigator, 'clipboard', {
+        configurable: true,
+        value: {
+          writeText(text) {
+            window.__copiedText = text;
+            return Promise.resolve();
+          }
+        }
+      });
+    });
+
+    await page.focus('#source');
+    await page.evaluate(() => {
+      const selection = window.getSelection();
+      const range = document.createRange();
+      range.selectNodeContents(document.getElementById('source'));
+      selection.removeAllRanges();
+      selection.addRange(range);
+    });
+    await page.keyboard.press('Control+c');
+    await page.waitForTimeout(100);
+
+    const clipboardText = await page.evaluate(() => window.__copiedText);
+    expect(clipboardText).toBe('导语\n2. $x^2$ 第一项\n3. $y^2$ 第二项\n结尾');
+  });
+
+  test('should preserve preformatted text adjacent to lists', async ({ page }) => {
+    await page.setContent(`
+      <!DOCTYPE html>
+      <html><body>
+        <div id="source" tabindex="0">
+          <ul>
+            <li>**第一项**（注释）</li>
+          </ul>
+          <pre>  const answer = 42;
+    return answer;</pre>
+        </div>
+      </body></html>
+    `);
+
+    await page.evaluate(coreScript);
+    await page.evaluate(() => {
+      window.__copiedText = null;
+      Object.defineProperty(navigator, 'clipboard', {
+        configurable: true,
+        value: {
+          writeText(text) {
+            window.__copiedText = text;
+            return Promise.resolve();
+          }
+        }
+      });
+    });
+
+    await page.focus('#source');
+    await page.evaluate(() => {
+      const selection = window.getSelection();
+      const range = document.createRange();
+      range.selectNodeContents(document.getElementById('source'));
+      selection.removeAllRanges();
+      selection.addRange(range);
+    });
+    await page.keyboard.press('Control+c');
+    await page.waitForTimeout(100);
+
+    const clipboardText = await page.evaluate(() => window.__copiedText);
+    expect(clipboardText).toBe('- 第一项\n  const answer = 42;\n    return answer;');
+  });
+
+  test('should preserve ordered list numbering when surrounding text repeats list content', async ({ page }) => {
+    await page.setContent(`
+      <!DOCTYPE html>
+      <html><body>
+        <div id="source" tabindex="0">
+          第一项
+          <ol start="3">
+            <li>**第一项**（注释）</li>
+            <li>**第二项**（说明）</li>
+          </ol>
+          第二项
+        </div>
+      </body></html>
+    `);
+
+    await page.evaluate(coreScript);
+    await page.evaluate(() => {
+      window.__copiedText = null;
+      Object.defineProperty(navigator, 'clipboard', {
+        configurable: true,
+        value: {
+          writeText(text) {
+            window.__copiedText = text;
+            return Promise.resolve();
+          }
+        }
+      });
+    });
+
+    await page.focus('#source');
+    await page.evaluate(() => {
+      const selection = window.getSelection();
+      const range = document.createRange();
+      range.selectNodeContents(document.getElementById('source'));
+      selection.removeAllRanges();
+      selection.addRange(range);
+    });
+    await page.keyboard.press('Control+c');
+    await page.waitForTimeout(100);
+
+    const clipboardText = await page.evaluate(() => window.__copiedText);
+    expect(clipboardText).toBe('第一项\n3. 第一项\n4. 第二项\n第二项');
+  });
 });

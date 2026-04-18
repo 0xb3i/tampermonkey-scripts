@@ -15,11 +15,12 @@
 (function () {
   'use strict';
 
-  function cleanText(text) {
+  function cleanText(text, options) {
+    options = options || {};
     var parts = splitByLatex(text);
     var cleaned = parts.map(function (part) {
       if (part.latex) return part.text;
-      return cleanPlainText(part.text, false);
+      return cleanPlainText(part.text, false, options.preserveIndentation);
     });
     var result = '';
     for (var i = 0; i < cleaned.length; i++) {
@@ -58,8 +59,9 @@
     return parts;
   }
 
-  function cleanPlainText(text, isStandalone) {
+  function cleanPlainText(text, isStandalone, preserveIndentation) {
     if (typeof isStandalone === 'undefined') isStandalone = true;
+    if (typeof preserveIndentation === 'undefined') preserveIndentation = false;
     var result = text;
 
     result = result.replace(/\*\*/g, '');
@@ -71,8 +73,15 @@
     result = result.replace(/["\u201C\u201D]/g, '');
     result = result.replace(/['\u2018\u2019]/g, '');
 
-    result = result.replace(/  +/g, ' ');
     result = result.replace(/\n{3,}/g, '\n\n');
+
+    if (!preserveIndentation) {
+      result = result.replace(/  +/g, ' ');
+    }
+
+    if (preserveIndentation) {
+      return result;
+    }
 
     if (isStandalone) {
       result = result.replace(/^ +| +$/gm, '');
@@ -294,6 +303,116 @@
     return element && element.closest('.katex');
   }
 
+  function getListItemPrefix(list, itemIndex) {
+    if (!list || list.tagName !== 'OL') return '- ';
+    var start = parseInt(list.getAttribute('start') || '1', 10);
+    if (isNaN(start)) start = 1;
+    return (start + itemIndex) + '. ';
+  }
+
+  function getListItemIndex(item) {
+    var index = 0;
+    while (item && item.previousElementSibling) {
+      item = item.previousElementSibling;
+      if (item.tagName === 'LI') index++;
+    }
+    return index;
+  }
+
+  function isBlockElement(node) {
+    return node && node.nodeType === Node.ELEMENT_NODE && /^(ADDRESS|ARTICLE|ASIDE|BLOCKQUOTE|DIV|DL|FIELDSET|FIGCAPTION|FIGURE|FOOTER|FORM|H[1-6]|HEADER|HR|LI|MAIN|NAV|OL|P|PRE|SECTION|TABLE|TR|UL)$/.test(node.tagName);
+  }
+
+  function appendStructuredText(state, text) {
+    if (!text) return;
+
+    var normalized = text.replace(/\s+/g, ' ');
+    if (!normalized.trim()) {
+      if (state.value && !/[ \n]$/.test(state.value)) state.value += ' ';
+      return;
+    }
+
+    if (/^\s/.test(normalized) && state.value && !/[ \n]$/.test(state.value)) {
+      state.value += ' ';
+    }
+
+    state.value += normalized.trim();
+    if (/\s$/.test(normalized)) state.value += ' ';
+  }
+
+  function appendStructuredLineBreak(state) {
+    state.value = state.value.replace(/[ \t]+$/, '');
+    if (state.value && !/\n$/.test(state.value)) state.value += '\n';
+  }
+
+  function serializeStructuredNode(node, state) {
+    if (!node) return;
+
+    if (node.nodeType === Node.TEXT_NODE) {
+      appendStructuredText(state, node.nodeValue);
+      return;
+    }
+
+    if (node.nodeType === Node.DOCUMENT_FRAGMENT_NODE) {
+      for (var child = node.firstChild; child; child = child.nextSibling) {
+        serializeStructuredNode(child, state);
+      }
+      return;
+    }
+
+    if (node.nodeType !== Node.ELEMENT_NODE) return;
+
+    if (node.tagName === 'BR') {
+      appendStructuredLineBreak(state);
+      return;
+    }
+
+    if (node.tagName === 'LI') {
+      appendStructuredLineBreak(state);
+      appendStructuredText(state, getListItemPrefix(node.parentElement, getListItemIndex(node)));
+      for (var listChild = node.firstChild; listChild; listChild = listChild.nextSibling) {
+        serializeStructuredNode(listChild, state);
+      }
+      appendStructuredLineBreak(state);
+      return;
+    }
+
+    if (node.tagName === 'PRE') {
+      appendStructuredLineBreak(state);
+      state.value += node.textContent.replace(/\r\n?/g, '\n').replace(/\n$/, '');
+      appendStructuredLineBreak(state);
+      return;
+    }
+
+    var isBlock = isBlockElement(node);
+    if (isBlock && node.tagName !== 'UL' && node.tagName !== 'OL') {
+      appendStructuredLineBreak(state);
+    }
+
+    for (var childNode = node.firstChild; childNode; childNode = childNode.nextSibling) {
+      serializeStructuredNode(childNode, state);
+    }
+
+    if (isBlock) appendStructuredLineBreak(state);
+  }
+
+  function serializeStructuredFragment(fragment) {
+    var state = { value: '' };
+    serializeStructuredNode(fragment, state);
+    return state.value
+      .replace(/[ \t]+\n/g, '\n')
+      .replace(/\n{3,}/g, '\n\n')
+      .trim();
+  }
+
+  function extractFragmentText(fragment, baseText) {
+    if (!fragment) return '';
+    if (fragment.querySelector && fragment.querySelector('ul li, ol li')) {
+      return serializeStructuredFragment(fragment);
+    }
+    return typeof baseText === 'string' ? baseText : fragment.textContent;
+  }
+
   function extractTextWithLatex(selection) {
     if (!selection || selection.rangeCount === 0) return null;
 
@@ -317,29 +436,52 @@
     extractLatexFromKatex(fragment);
     extractLatexFromMathJax(fragment);
 
-    return fragment.textContent;
+    return extractFragmentText(fragment, fragment.textContent);
+  }
+
+  function extractStructuredSelectionText(selection) {
+    if (!selection || selection.rangeCount === 0) return null;
+    var fragment = selection.getRangeAt(0).cloneContents();
+    if (!fragment.querySelector || !fragment.querySelector('ul li, ol li')) return null;
+    return {
+      text: extractFragmentText(fragment, selection.toString()),
+      preserveIndentation: !!fragment.querySelector('pre'),
+    };
   }
 
   window.__copyCleanerExtractLatex = extractTextWithLatex;
 
-  function getCleanedText() {
-    var selection = window.getSelection();
+  function resolveSelectionPayload(selection) {
     if (!selection || selection.isCollapsed) return null;
 
+    var rawText = selection.toString();
     var latexText = extractTextWithLatex(selection);
     if (latexText !== null) {
-      return cleanText(latexText);
+      return { text: cleanText(latexText), shouldIntercept: true };
     }
 
-    var originalText = selection.toString();
-    if (!originalText) return null;
+    var structuredText = extractStructuredSelectionText(selection);
+    if (structuredText !== null) {
+      var structuredCleaned = cleanText(structuredText.text, { preserveIndentation: structuredText.preserveIndentation });
+      return {
+        text: structuredCleaned,
+        shouldIntercept: structuredText.text !== rawText || structuredCleaned !== rawText,
+      };
+    }
 
-    var cleaned = cleanText(originalText);
-    if (cleaned !== originalText) {
-      return cleaned;
+    if (!rawText) return null;
+    var cleanedText = cleanText(rawText);
+    if (cleanedText !== rawText) {
+      return { text: cleanedText, shouldIntercept: true };
     }
 
     return null;
+  }
+
+  function getCleanedText() {
+    var selection = window.getSelection();
+    var payload = resolveSelectionPayload(selection);
+    return payload && payload.shouldIntercept ? payload.text : null;
   }
 
   function patchClipboardAPI() {
@@ -390,31 +532,17 @@
 
   patchClipboardAPI();
 
-  document.addEventListener('copy', function (e) {
+  function onCopy(e) {
     var selection = window.getSelection();
-    if (!selection || selection.isCollapsed) return;
+    var payload = resolveSelectionPayload(selection);
+    if (!payload || !payload.shouldIntercept || !e.clipboardData) return;
 
-    var latexText = extractTextWithLatex(selection);
-    if (latexText !== null) {
-      e.preventDefault();
-      e.stopImmediatePropagation();
-      e.clipboardData.setData('text/plain', cleanText(latexText));
-      return;
-    }
+    e.preventDefault();
+    e.stopImmediatePropagation();
+    e.clipboardData.setData('text/plain', payload.text);
+  }
 
-    var originalText = selection.toString();
-    if (!originalText) return;
-
-    var cleanedText = cleanText(originalText);
-
-    if (cleanedText !== originalText) {
-      e.preventDefault();
-      e.stopImmediatePropagation();
-      e.clipboardData.setData('text/plain', cleanedText);
-    }
-  }, true);
-
-  document.addEventListener('keydown', function (e) {
+  function onKeydown(e) {
     var isCopy = (e.ctrlKey || e.metaKey) && e.key === 'c';
     if (!isCopy) return;
 
@@ -427,5 +555,8 @@
     if (navigator.clipboard && navigator.clipboard.writeText) {
       navigator.clipboard.writeText(cleaned).catch(function () {});
     }
-  }, true);
+  }
+
+  window.addEventListener('copy', onCopy, true);
+  window.addEventListener('keydown', onKeydown, true);
 })();
