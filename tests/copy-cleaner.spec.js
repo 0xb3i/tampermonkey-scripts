@@ -420,6 +420,89 @@ test.describe('Copy Cleaner - copy event integration', () => {
     expect(clipboardText).toBe('第一项\n- 第一项\n- 第二项\n第一项');
   });
 
+  test('should preserve raw latex inside structured list content', async ({ page }) => {
+    await page.setContent(`
+      <!DOCTYPE html>
+      <html><body>
+        <div id="source" tabindex="0">
+          <ul>
+            <li>公式 $f（x）$（注释）</li>
+          </ul>
+        </div>
+      </body></html>
+    `);
+
+    await page.evaluate(coreScript);
+    await page.evaluate(() => {
+      window.__copiedText = null;
+      Object.defineProperty(navigator, 'clipboard', {
+        configurable: true,
+        value: {
+          writeText(text) {
+            window.__copiedText = text;
+            return Promise.resolve();
+          }
+        }
+      });
+    });
+
+    await page.focus('#source');
+    await page.evaluate(() => {
+      const selection = window.getSelection();
+      const range = document.createRange();
+      range.selectNodeContents(document.getElementById('source'));
+      selection.removeAllRanges();
+      selection.addRange(range);
+    });
+    await page.keyboard.press('Control+c');
+    await page.waitForTimeout(100);
+
+    const clipboardText = await page.evaluate(() => window.__copiedText);
+    expect(clipboardText).toBe('- 公式 $f（x）$');
+  });
+
+  test('should preserve multiline latex inside structured list content', async ({ page }) => {
+    await page.setContent(`
+      <!DOCTYPE html>
+      <html><body>
+        <div id="source" tabindex="0">
+          <ul>
+            <li>$$a
+b$$</li>
+          </ul>
+        </div>
+      </body></html>
+    `);
+
+    await page.evaluate(coreScript);
+    await page.evaluate(() => {
+      window.__copiedText = null;
+      Object.defineProperty(navigator, 'clipboard', {
+        configurable: true,
+        value: {
+          writeText(text) {
+            window.__copiedText = text;
+            return Promise.resolve();
+          }
+        }
+      });
+    });
+
+    await page.focus('#source');
+    await page.evaluate(() => {
+      const selection = window.getSelection();
+      const range = document.createRange();
+      range.selectNodeContents(document.getElementById('source'));
+      selection.removeAllRanges();
+      selection.addRange(range);
+    });
+    await page.keyboard.press('Control+c');
+    await page.waitForTimeout(100);
+
+    const clipboardText = await page.evaluate(() => window.__copiedText);
+    expect(clipboardText).toBe('- $$a\nb$$');
+  });
+
   test('should preserve simple ordered list numbering', async ({ page }) => {
     await page.setContent(`
       <!DOCTYPE html>
@@ -623,6 +706,405 @@ test.describe('Copy Cleaner - copy event integration', () => {
 
     const clipboardText = await page.evaluate(() => window.__copiedText);
     expect(clipboardText).toBe('- 第一项\n  const answer = 42;\n    return answer;');
+  });
+
+  test('should preserve heading markers when manually copying cleaned text', async ({ page }) => {
+    await page.setContent(`
+      <!DOCTYPE html>
+      <html><body>
+        <div id="source" tabindex="0">
+          <h2>**章节标题**（注释）</h2>
+          <p>段落正文</p>
+        </div>
+      </body></html>
+    `);
+
+    await page.evaluate(coreScript);
+    await page.evaluate(() => {
+      window.__copiedText = null;
+      Object.defineProperty(navigator, 'clipboard', {
+        configurable: true,
+        value: {
+          writeText(text) {
+            window.__copiedText = text;
+            return Promise.resolve();
+          }
+        }
+      });
+    });
+
+    await page.focus('#source');
+    await page.evaluate(() => {
+      const selection = window.getSelection();
+      const range = document.createRange();
+      range.selectNodeContents(document.getElementById('source'));
+      selection.removeAllRanges();
+      selection.addRange(range);
+    });
+    await page.keyboard.press('Control+c');
+    await page.waitForTimeout(100);
+
+    const clipboardText = await page.evaluate(() => window.__copiedText);
+    expect(clipboardText).toBe('## 章节标题\n段落正文');
+  });
+
+  test('should preserve blockquote markers in copy event path', async ({ page }) => {
+    await page.setContent(`
+      <!DOCTYPE html>
+      <html><body>
+        <div id="source">
+          <blockquote>
+            <p>**引用内容**（注释）</p>
+            <p>第二行</p>
+          </blockquote>
+        </div>
+      </body></html>
+    `);
+
+    await page.evaluate(coreScript);
+
+    const copiedText = await page.evaluate(() => {
+      const selection = window.getSelection();
+      const range = document.createRange();
+      range.selectNodeContents(document.getElementById('source'));
+      selection.removeAllRanges();
+      selection.addRange(range);
+
+      const dataTransfer = new DataTransfer();
+      const copyEvent = new Event('copy', { bubbles: true, cancelable: true });
+      Object.defineProperty(copyEvent, 'clipboardData', { value: dataTransfer });
+      document.dispatchEvent(copyEvent);
+      return dataTransfer.getData('text/plain');
+    });
+
+    expect(copiedText).toBe('> 引用内容\n> 第二行');
+  });
+
+  test('should preserve code fences and thematic breaks when manually copying cleaned text', async ({ page }) => {
+    await page.setContent(`
+      <!DOCTYPE html>
+      <html><body>
+        <div id="source" tabindex="0">
+          <pre><code>const answer = 42;\nreturn answer;</code></pre>
+          <hr>
+          <p>收尾</p>
+        </div>
+      </body></html>
+    `);
+
+    await page.evaluate(coreScript);
+    await page.evaluate(() => {
+      window.__copiedText = null;
+      Object.defineProperty(navigator, 'clipboard', {
+        configurable: true,
+        value: {
+          writeText(text) {
+            window.__copiedText = text;
+            return Promise.resolve();
+          }
+        }
+      });
+    });
+
+    await page.focus('#source');
+    await page.evaluate(() => {
+      const selection = window.getSelection();
+      const range = document.createRange();
+      range.selectNodeContents(document.getElementById('source'));
+      selection.removeAllRanges();
+      selection.addRange(range);
+    });
+    await page.keyboard.press('Control+c');
+    await page.waitForTimeout(100);
+
+    const clipboardText = await page.evaluate(() => window.__copiedText);
+    expect(clipboardText).toBe('```\nconst answer = 42;\nreturn answer;\n```\n---\n收尾');
+  });
+
+  test('should preserve code block literals without cleaning inside fences', async ({ page }) => {
+    await page.setContent(`
+      <!DOCTYPE html>
+      <html><body>
+        <div id="source" tabindex="0">
+          <pre><code>const label = "**标题**";
+const note = '（保留）';</code></pre>
+        </div>
+      </body></html>
+    `);
+
+    await page.evaluate(coreScript);
+    await page.evaluate(() => {
+      window.__copiedText = null;
+      Object.defineProperty(navigator, 'clipboard', {
+        configurable: true,
+        value: {
+          writeText(text) {
+            window.__copiedText = text;
+            return Promise.resolve();
+          }
+        }
+      });
+    });
+
+    await page.focus('#source');
+    await page.evaluate(() => {
+      const selection = window.getSelection();
+      const range = document.createRange();
+      range.selectNodeContents(document.getElementById('source'));
+      selection.removeAllRanges();
+      selection.addRange(range);
+    });
+    await page.keyboard.press('Control+c');
+    await page.waitForTimeout(100);
+
+    const clipboardText = await page.evaluate(() => window.__copiedText);
+    expect(clipboardText).toBe('```\nconst label = "**标题**";\nconst note = \'（保留）\';\n```');
+  });
+
+  test('should preserve code block literals through patched clipboard writeText path', async ({ page }) => {
+    await page.setContent(`
+      <!DOCTYPE html>
+      <html><body>
+        <div id="source" tabindex="0">
+          <pre><code>const label = "**标题**";
+const note = '（保留）';</code></pre>
+        </div>
+      </body></html>
+    `);
+
+    await page.evaluate(() => {
+      window.__copiedText = null;
+      function ClipboardMock() {}
+      ClipboardMock.prototype.writeText = function (text) {
+        window.__copiedText = text;
+        return Promise.resolve();
+      };
+      window.Clipboard = ClipboardMock;
+      Object.defineProperty(navigator, 'clipboard', {
+        configurable: true,
+        value: new ClipboardMock()
+      });
+    });
+    await page.evaluate(coreScript);
+
+    await page.focus('#source');
+    await page.evaluate(() => {
+      const selection = window.getSelection();
+      const range = document.createRange();
+      range.selectNodeContents(document.getElementById('source'));
+      selection.removeAllRanges();
+      selection.addRange(range);
+    });
+    await page.keyboard.press('Control+c');
+    await page.waitForTimeout(100);
+
+    const clipboardText = await page.evaluate(() => window.__copiedText);
+    expect(clipboardText).toBe('```\nconst label = "**标题**";\nconst note = \'（保留）\';\n```');
+  });
+
+  test('should not reclean structured markdown generated from rendered latex selections', async ({ page }) => {
+    await page.setContent(`
+      <!DOCTYPE html>
+      <html><body>
+        <div id="source" tabindex="0">
+          <blockquote>
+            <p><span class="katex"><span class="katex-mathml"><math><semantics><annotation encoding="application/x-tex">x^2</annotation></semantics></math></span><span class="katex-html" aria-hidden="true">x^2</span></span> 公式（注释）</p>
+            <pre><code>const label = "**保留**";</code></pre>
+          </blockquote>
+        </div>
+      </body></html>
+    `);
+
+    await page.evaluate(() => {
+      window.__copiedText = null;
+      function ClipboardMock() {}
+      ClipboardMock.prototype.writeText = function (text) {
+        window.__copiedText = text;
+        return Promise.resolve();
+      };
+      window.Clipboard = ClipboardMock;
+      Object.defineProperty(navigator, 'clipboard', {
+        configurable: true,
+        value: new ClipboardMock()
+      });
+    });
+    await page.evaluate(coreScript);
+
+    await page.focus('#source');
+    await page.evaluate(() => {
+      const selection = window.getSelection();
+      const range = document.createRange();
+      range.selectNodeContents(document.getElementById('source'));
+      selection.removeAllRanges();
+      selection.addRange(range);
+    });
+    await page.keyboard.press('Control+c');
+    await page.waitForTimeout(100);
+
+    const clipboardText = await page.evaluate(() => window.__copiedText);
+    expect(clipboardText).toBe('> $x^2$ 公式\n> ```\n> const label = "**保留**";\n> ```');
+  });
+
+  test('should preserve nested structure inside blockquotes', async ({ page }) => {
+    await page.setContent(`
+      <!DOCTYPE html>
+      <html><body>
+        <div id="source">
+          <blockquote>
+            <h3>**引用标题**（注释）</h3>
+            <pre><code>const x = 1;</code></pre>
+          </blockquote>
+        </div>
+      </body></html>
+    `);
+
+    await page.evaluate(coreScript);
+
+    const copiedText = await page.evaluate(() => {
+      const selection = window.getSelection();
+      const range = document.createRange();
+      range.selectNodeContents(document.getElementById('source'));
+      selection.removeAllRanges();
+      selection.addRange(range);
+
+      const dataTransfer = new DataTransfer();
+      const copyEvent = new Event('copy', { bubbles: true, cancelable: true });
+      Object.defineProperty(copyEvent, 'clipboardData', { value: dataTransfer });
+      document.dispatchEvent(copyEvent);
+      return dataTransfer.getData('text/plain');
+    });
+
+    expect(copiedText).toBe('> ### 引用标题\n> ```\n> const x = 1;\n> ```');
+  });
+
+  test('should preserve tables as markdown when manually copying cleaned text', async ({ page }) => {
+    await page.setContent(`
+      <!DOCTYPE html>
+      <html><body>
+        <div id="source" tabindex="0">
+          <table>
+            <thead>
+              <tr><th>列A</th><th>列B</th></tr>
+            </thead>
+            <tbody>
+              <tr><td>**值1**（注释）</td><td>普通文本</td></tr>
+              <tr><td><code>a|b</code></td><td>换行<br>内容</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </body></html>
+    `);
+
+    await page.evaluate(coreScript);
+    await page.evaluate(() => {
+      window.__copiedText = null;
+      Object.defineProperty(navigator, 'clipboard', {
+        configurable: true,
+        value: {
+          writeText(text) {
+            window.__copiedText = text;
+            return Promise.resolve();
+          }
+        }
+      });
+    });
+
+    await page.focus('#source');
+    await page.evaluate(() => {
+      const selection = window.getSelection();
+      const range = document.createRange();
+      range.selectNodeContents(document.getElementById('source'));
+      selection.removeAllRanges();
+      selection.addRange(range);
+    });
+    await page.keyboard.press('Control+c');
+    await page.waitForTimeout(100);
+
+    const clipboardText = await page.evaluate(() => window.__copiedText);
+    expect(clipboardText).toBe('| 列A | 列B |\n| --- | --- |\n| 值1 | 普通文本 |\n| `a\\|b` | 换行<br>内容 |');
+  });
+
+  test('should preserve headerless tables without promoting first row to header', async ({ page }) => {
+    await page.setContent(`
+      <!DOCTYPE html>
+      <html><body>
+        <div id="source" tabindex="0">
+          <table>
+            <tbody>
+              <tr><td>A1</td><td>B1</td></tr>
+              <tr><td>A2</td><td>B2</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </body></html>
+    `);
+
+    await page.evaluate(coreScript);
+    await page.evaluate(() => {
+      window.__copiedText = null;
+      Object.defineProperty(navigator, 'clipboard', {
+        configurable: true,
+        value: {
+          writeText(text) {
+            window.__copiedText = text;
+            return Promise.resolve();
+          }
+        }
+      });
+    });
+
+    await page.focus('#source');
+    await page.evaluate(() => {
+      const selection = window.getSelection();
+      const range = document.createRange();
+      range.selectNodeContents(document.getElementById('source'));
+      selection.removeAllRanges();
+      selection.addRange(range);
+    });
+    await page.keyboard.press('Control+c');
+    await page.waitForTimeout(100);
+
+    const clipboardText = await page.evaluate(() => window.__copiedText);
+    expect(clipboardText).toBe('|  |  |\n| --- | --- |\n| A1 | B1 |\n| A2 | B2 |');
+  });
+
+  test('should use longer code fences when code contains triple backticks', async ({ page }) => {
+    await page.setContent(`
+      <!DOCTYPE html>
+      <html><body>
+        <div id="source" tabindex="0">
+          <pre><code>console.log(&quot;${'```'}&quot;);</code></pre>
+        </div>
+      </body></html>
+    `);
+
+    await page.evaluate(coreScript);
+    await page.evaluate(() => {
+      window.__copiedText = null;
+      Object.defineProperty(navigator, 'clipboard', {
+        configurable: true,
+        value: {
+          writeText(text) {
+            window.__copiedText = text;
+            return Promise.resolve();
+          }
+        }
+      });
+    });
+
+    await page.focus('#source');
+    await page.evaluate(() => {
+      const selection = window.getSelection();
+      const range = document.createRange();
+      range.selectNodeContents(document.getElementById('source'));
+      selection.removeAllRanges();
+      selection.addRange(range);
+    });
+    await page.keyboard.press('Control+c');
+    await page.waitForTimeout(100);
+
+    const clipboardText = await page.evaluate(() => window.__copiedText);
+    expect(clipboardText).toBe('````\nconsole.log("```");\n````');
   });
 
   test('should preserve ordered list numbering when surrounding text repeats list content', async ({ page }) => {

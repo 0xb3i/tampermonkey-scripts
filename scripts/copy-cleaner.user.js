@@ -323,11 +323,153 @@
     return node && node.nodeType === Node.ELEMENT_NODE && /^(ADDRESS|ARTICLE|ASIDE|BLOCKQUOTE|DIV|DL|FIELDSET|FIGCAPTION|FIGURE|FOOTER|FORM|H[1-6]|HEADER|HR|LI|MAIN|NAV|OL|P|PRE|SECTION|TABLE|TR|UL)$/.test(node.tagName);
   }
 
+  function createStructuredState() {
+    return { value: '' };
+  }
+
+  function finalizeStructuredValue(value) {
+    return value
+      .replace(/[ \t]+\n/g, '\n')
+      .replace(/\n{3,}/g, '\n\n')
+      .trim();
+  }
+
+  function getStructuredNodeText(node) {
+    var nestedState = createStructuredState();
+    for (var child = node.firstChild; child; child = child.nextSibling) {
+      serializeStructuredNode(child, nestedState);
+    }
+    return finalizeStructuredValue(nestedState.value);
+  }
+
+  function getStructuredSingleNodeText(node) {
+    var nestedState = createStructuredState();
+    serializeStructuredNode(node, nestedState);
+    return finalizeStructuredValue(nestedState.value);
+  }
+
+  function normalizeStructuredText(text) {
+    return splitByLatex(text).map(function (part) {
+      if (part.latex) return part.text;
+      return cleanPlainText(part.text.replace(/\s+/g, ' '), false);
+    }).join('');
+  }
+
+  function appendInlineText(parts, text) {
+    if (!text) return;
+    var normalized = text.replace(/\s+/g, ' ');
+    var cleaned = normalizeStructuredText(text);
+    if (!cleaned.trim()) {
+      if (parts.length && !/[ <\n]$/.test(parts[parts.length - 1])) parts.push(' ');
+      return;
+    }
+    if (/^\s/.test(normalized) && parts.length && !/[ <\n]$/.test(parts[parts.length - 1])) {
+      parts.push(' ');
+    }
+    parts.push(cleaned.trim());
+    if (/\s$/.test(normalized)) parts.push(' ');
+  }
+
+  function serializeInlineNode(node, parts, options) {
+    if (!node) return;
+
+    if (node.nodeType === Node.TEXT_NODE) {
+      appendInlineText(parts, node.nodeValue);
+      return;
+    }
+
+    if (node.nodeType !== Node.ELEMENT_NODE) return;
+
+    if (node.tagName === 'BR') {
+      parts.push(options && options.lineBreakToken ? options.lineBreakToken : '\n');
+      return;
+    }
+
+    if (node.tagName === 'CODE') {
+      var codeText = node.textContent.replace(/\r\n?/g, '\n').replace(/\n+/g, ' ');
+      parts.push('`' + codeText.replace(/`/g, '\\`').replace(/\|/g, '\\|') + '`');
+      return;
+    }
+
+    for (var child = node.firstChild; child; child = child.nextSibling) {
+      serializeInlineNode(child, parts, options);
+    }
+  }
+
+  function getInlineNodeText(node, options) {
+    var parts = [];
+    for (var child = node.firstChild; child; child = child.nextSibling) {
+      serializeInlineNode(child, parts, options);
+    }
+    return parts.join('').replace(/[ \t]+$/g, '').replace(/^[ \t]+/g, '');
+  }
+
+  function normalizeTableCell(text) {
+    return text.replace(/(^|[^\\])\|/g, '$1\\|');
+  }
+
+  function getCodeFence(text) {
+    var matches = text.match(/`+/g) || [];
+    var longest = 2;
+    for (var i = 0; i < matches.length; i++) {
+      if (matches[i].length > longest) longest = matches[i].length;
+    }
+    return new Array(longest + 2).join('`');
+  }
+
+  function buildMarkdownTable(table) {
+    var rowNodes = table.querySelectorAll('tr');
+    if (!rowNodes.length) return '';
+
+    var rows = [];
+    for (var i = 0; i < rowNodes.length; i++) {
+      var cellNodes = rowNodes[i].children;
+      var cells = [];
+      var isHeader = false;
+      for (var j = 0; j < cellNodes.length; j++) {
+        if (cellNodes[j].tagName !== 'TH' && cellNodes[j].tagName !== 'TD') continue;
+        if (cellNodes[j].tagName === 'TH') isHeader = true;
+        cells.push(normalizeTableCell(getInlineNodeText(cellNodes[j], { lineBreakToken: '<br>' })));
+      }
+      if (cells.length) rows.push({ cells: cells, isHeader: isHeader });
+    }
+
+    if (!rows.length) return '';
+
+    var columnCount = 0;
+    for (var k = 0; k < rows.length; k++) {
+      if (rows[k].cells.length > columnCount) columnCount = rows[k].cells.length;
+    }
+    if (!columnCount) return '';
+
+    function formatRow(cells) {
+      var padded = [];
+      for (var m = 0; m < columnCount; m++) {
+        padded.push(cells[m] || '');
+      }
+      return '| ' + padded.join(' | ') + ' |';
+    }
+
+    var header = rows[0].isHeader ? rows[0].cells : new Array(columnCount).fill('');
+    var bodyRows = rows[0].isHeader ? rows.slice(1) : rows;
+    var lines = [
+      formatRow(header),
+      formatRow(new Array(columnCount).fill('---')),
+    ];
+
+    for (var n = 0; n < bodyRows.length; n++) {
+      lines.push(formatRow(bodyRows[n].cells));
+    }
+
+    return lines.join('\n');
+  }
+
   function appendStructuredText(state, text) {
     if (!text) return;
 
     var normalized = text.replace(/\s+/g, ' ');
-    if (!normalized.trim()) {
+    var cleaned = normalizeStructuredText(text);
+    if (!cleaned.trim()) {
       if (state.value && !/[ \n]$/.test(state.value)) state.value += ' ';
       return;
     }
@@ -336,13 +478,20 @@
       state.value += ' ';
     }
 
-    state.value += normalized.trim();
+    state.value += cleaned.trim();
     if (/\s$/.test(normalized)) state.value += ' ';
   }
 
   function appendStructuredLineBreak(state) {
     state.value = state.value.replace(/[ \t]+$/, '');
     if (state.value && !/\n$/.test(state.value)) state.value += '\n';
+  }
+
+  function appendStructuredBlock(state, text) {
+    if (!text) return;
+    appendStructuredLineBreak(state);
+    state.value += text;
+    appendStructuredLineBreak(state);
   }
 
   function serializeStructuredNode(node, state) {
@@ -377,7 +526,46 @@
       return;
     }
 
+    if (/^H[1-6]$/.test(node.tagName)) {
+      var level = parseInt(node.tagName.charAt(1), 10);
+      appendStructuredBlock(state, new Array(level + 1).join('#') + ' ' + getStructuredNodeText(node));
+      return;
+    }
+
+    if (node.tagName === 'BLOCKQUOTE') {
+      var quoteParts = [];
+      for (var quoteChild = node.firstChild; quoteChild; quoteChild = quoteChild.nextSibling) {
+        var quotePart = getStructuredSingleNodeText(quoteChild);
+        if (quotePart) quoteParts.push(quotePart);
+      }
+      var quoteText = quoteParts.join('\n');
+      if (!quoteText) return;
+      appendStructuredBlock(state, quoteText.split('\n').map(function (line) {
+        return line ? '> ' + line : '>';
+      }).join('\n'));
+      return;
+    }
+
+    if (node.tagName === 'HR') {
+      appendStructuredBlock(state, '---');
+      return;
+    }
+
+    if (node.tagName === 'TABLE') {
+      appendStructuredBlock(state, buildMarkdownTable(node));
+      return;
+    }
+
     if (node.tagName === 'PRE') {
+      var codeChild = node.children && node.children.length === 1 && node.firstElementChild && node.firstElementChild.tagName === 'CODE'
+        ? node.firstElementChild
+        : null;
+      if (codeChild) {
+        var codeText = codeChild.textContent.replace(/\r\n?/g, '\n').replace(/\n$/, '');
+        var fence = getCodeFence(codeText);
+        appendStructuredBlock(state, fence + '\n' + codeText + '\n' + fence);
+        return;
+      }
       appendStructuredLineBreak(state);
       state.value += node.textContent.replace(/\r\n?/g, '\n').replace(/\n$/, '');
       appendStructuredLineBreak(state);
@@ -397,23 +585,24 @@
   }
 
   function serializeStructuredFragment(fragment) {
-    var state = { value: '' };
+    var state = createStructuredState();
     serializeStructuredNode(fragment, state);
-    return state.value
-      .replace(/[ \t]+\n/g, '\n')
-      .replace(/\n{3,}/g, '\n\n')
-      .trim();
+    return finalizeStructuredValue(state.value);
+  }
+
+  function hasStructuredFragmentContent(fragment) {
+    return !!(fragment && fragment.querySelector && fragment.querySelector('ul li, ol li, h1, h2, h3, h4, h5, h6, blockquote, pre, hr, table'));
   }
 
   function extractFragmentText(fragment, baseText) {
     if (!fragment) return '';
-    if (fragment.querySelector && fragment.querySelector('ul li, ol li')) {
+    if (hasStructuredFragmentContent(fragment)) {
       return serializeStructuredFragment(fragment);
     }
     return typeof baseText === 'string' ? baseText : fragment.textContent;
   }
 
-  function extractTextWithLatex(selection) {
+  function resolveLatexSelectionPayload(selection) {
     if (!selection || selection.rangeCount === 0) return null;
 
     var range = selection.getRangeAt(0).cloneRange();
@@ -436,16 +625,24 @@
     extractLatexFromKatex(fragment);
     extractLatexFromMathJax(fragment);
 
-    return extractFragmentText(fragment, fragment.textContent);
+    return {
+      text: extractFragmentText(fragment, fragment.textContent),
+      alreadyStructured: hasStructuredFragmentContent(fragment),
+    };
+  }
+
+  function extractTextWithLatex(selection) {
+    var payload = resolveLatexSelectionPayload(selection);
+    return payload ? payload.text : null;
   }
 
   function extractStructuredSelectionText(selection) {
     if (!selection || selection.rangeCount === 0) return null;
     var fragment = selection.getRangeAt(0).cloneContents();
-    if (!fragment.querySelector || !fragment.querySelector('ul li, ol li')) return null;
+    if (!hasStructuredFragmentContent(fragment)) return null;
     return {
       text: extractFragmentText(fragment, selection.toString()),
-      preserveIndentation: !!fragment.querySelector('pre'),
+      alreadyCleaned: true,
     };
   }
 
@@ -455,17 +652,19 @@
     if (!selection || selection.isCollapsed) return null;
 
     var rawText = selection.toString();
-    var latexText = extractTextWithLatex(selection);
-    if (latexText !== null) {
-      return { text: cleanText(latexText), shouldIntercept: true };
+    var latexPayload = resolveLatexSelectionPayload(selection);
+    if (latexPayload !== null) {
+      return {
+        text: latexPayload.alreadyStructured ? latexPayload.text : cleanText(latexPayload.text),
+        shouldIntercept: true,
+      };
     }
 
     var structuredText = extractStructuredSelectionText(selection);
     if (structuredText !== null) {
-      var structuredCleaned = cleanText(structuredText.text, { preserveIndentation: structuredText.preserveIndentation });
       return {
-        text: structuredCleaned,
-        shouldIntercept: structuredText.text !== rawText || structuredCleaned !== rawText,
+        text: structuredText.text,
+        shouldIntercept: structuredText.text !== rawText,
       };
     }
 
@@ -481,7 +680,23 @@
   function getCleanedText() {
     var selection = window.getSelection();
     var payload = resolveSelectionPayload(selection);
-    return payload && payload.shouldIntercept ? payload.text : null;
+    return payload && payload.shouldIntercept ? payload : null;
+  }
+
+  var shouldBypassClipboardClean = false;
+
+  function withClipboardCleanBypass(fn) {
+    shouldBypassClipboardClean = true;
+    var result;
+    try {
+      result = fn();
+    } catch (error) {
+      shouldBypassClipboardClean = false;
+      throw error;
+    }
+    return Promise.resolve(result).finally(function () {
+      shouldBypassClipboardClean = false;
+    });
   }
 
   function patchClipboardAPI() {
@@ -491,6 +706,9 @@
       const originalWriteText = Clipboard.prototype.writeText;
       Object.defineProperty(Clipboard.prototype, 'writeText', {
         value: function (text) {
+          if (shouldBypassClipboardClean) {
+            return originalWriteText.call(this, text);
+          }
           const cleaned = cleanText(text);
           return originalWriteText.call(this, cleaned);
         },
@@ -512,6 +730,9 @@
                 newItem[type] = item.getType(type).then(function (blob) {
                   return blob.text();
                 }).then(function (text) {
+                  if (shouldBypassClipboardClean) {
+                    return new Blob([text], { type: 'text/plain' });
+                  }
                   const cleaned = cleanText(text);
                   return new Blob([cleaned], { type: 'text/plain' });
                 });
@@ -546,14 +767,16 @@
     var isCopy = (e.ctrlKey || e.metaKey) && e.key === 'c';
     if (!isCopy) return;
 
-    var cleaned = getCleanedText();
-    if (cleaned === null) return;
+    var payload = getCleanedText();
+    if (payload === null) return;
 
     e.preventDefault();
     e.stopImmediatePropagation();
 
     if (navigator.clipboard && navigator.clipboard.writeText) {
-      navigator.clipboard.writeText(cleaned).catch(function () {});
+      withClipboardCleanBypass(function () {
+        return navigator.clipboard.writeText(payload.text);
+      }).catch(function () {});
     }
   }
 
