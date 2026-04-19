@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         飞书文档助手
 // @namespace    https://github.com/tampermonkey-scripts
-// @version      4.2.16
+// @version      4.2.17
 // @description  飞书文档完整复制、图片提取、文档副本（含LaTeX公式）
 // @author       You
 // @match        https://*.feishu.cn/*
@@ -13,6 +13,14 @@
 
 (function () {
   'use strict';
+
+  if (window.__feishuHelperRuntime && typeof window.__feishuHelperRuntime.dispose === 'function') {
+    try {
+      window.__feishuHelperRuntime.dispose();
+    } catch (error) {
+      console.warn('[Feishu Helper] failed to dispose previous runtime', error);
+    }
+  }
 
   var SCRIPT_NAME = '飞书文档助手';
   var SCRIPT_VERSION = '4.2.16';
@@ -35,6 +43,36 @@
     whiteboard: '白板',
     synced_reference: '引用块',
   };
+  var runtimeDisposers = [];
+
+  function registerRuntimeDisposer(disposer) {
+    if (typeof disposer !== 'function') return disposer;
+    runtimeDisposers.push(disposer);
+    return disposer;
+  }
+
+  function registerEventListener(target, type, listener, options) {
+    if (!target || typeof target.addEventListener !== 'function' || typeof listener !== 'function') {
+      return listener;
+    }
+    target.addEventListener(type, listener, options);
+    registerRuntimeDisposer(function () {
+      target.removeEventListener(type, listener, options);
+    });
+    return listener;
+  }
+
+  window.__feishuHelperRuntime = {
+    version: SCRIPT_VERSION,
+    dispose: function () {
+      while (runtimeDisposers.length) {
+        var disposer = runtimeDisposers.pop();
+        try {
+          disposer();
+        } catch (error) {}
+      }
+    },
+  };
   console.info('[Feishu Helper v' + SCRIPT_VERSION + '] loaded on', location.href);
 
   function getContentRootElement() {
@@ -49,15 +87,49 @@
     return fiberKey ? el[fiberKey] : null;
   }
 
+  function getEditorApiSearchElements() {
+    var candidates = [];
+
+    function pushCandidate(node) {
+      if (!node || node.nodeType !== 1 || candidates.indexOf(node) !== -1) return;
+      candidates.push(node);
+    }
+
+    pushCandidate(document.activeElement);
+
+    var selection = null;
+    try {
+      selection = window.getSelection ? window.getSelection() : null;
+    } catch (error) {}
+    pushCandidate(selection && selection.anchorNode ? (selection.anchorNode.nodeType === 1 ? selection.anchorNode : selection.anchorNode.parentElement) : null);
+
+    pushCandidate(getContentRootElement());
+
+    Array.prototype.slice.call(document.querySelectorAll(EDITABLE_SELECTOR), 0, 12).forEach(function (node) {
+      pushCandidate(node);
+    });
+
+    return candidates;
+  }
+
   function findEditorApiValue(extractor) {
-    var fiber = getReactFiberNode(getContentRootElement());
-    var depth = 0;
-    while (fiber && depth < 15) {
-      var props = fiber.memoizedProps || {};
-      var value = extractor(props);
-      if (value) return value;
-      fiber = fiber.return;
-      depth++;
+    var candidates = getEditorApiSearchElements();
+    for (var i = 0; i < candidates.length; i++) {
+      var node = candidates[i];
+      var domDepth = 0;
+      while (node && domDepth < 6) {
+        var fiber = getReactFiberNode(node);
+        var fiberDepth = 0;
+        while (fiber && fiberDepth < 40) {
+          var props = fiber.memoizedProps || {};
+          var value = extractor(props);
+          if (value) return value;
+          fiber = fiber.return;
+          fiberDepth++;
+        }
+        node = node.parentElement;
+        domDepth++;
+      }
     }
     return null;
   }
@@ -77,6 +149,27 @@
     return findEditorApiValue(function (props) {
       return props.editorAPI;
     });
+  }
+
+  function getEditorReadyState() {
+    var root = getContentRootElement() || document.querySelector(EDITABLE_SELECTOR);
+    var editorAPI = getEditorAPI();
+    var structService = editorAPI && editorAPI.structService ? editorAPI.structService : getStructService();
+    var hasStructAPI = !!(structService && structService.rootBlock);
+    // Content is considered loaded when the content root has meaningful innerHTML,
+    // even if the React fiber-based editorAPI is not available (e.g. newer Feishu builds).
+    var hasContentLoaded = !!(root && root.innerHTML && root.innerHTML.length > 100);
+    return {
+      href: location.href,
+      readyState: document.readyState,
+      hasContentRoot: !!root,
+      contentRootTag: root ? String(root.tagName || '') : '',
+      hasEditorAPI: !!editorAPI,
+      hasStructService: !!structService,
+      hasRootBlock: hasStructAPI,
+      rootChildCount: structService && structService.rootBlock ? getBlockChildren(structService.rootBlock).length : 0,
+      hasContentLoaded: hasContentLoaded,
+    };
   }
 
   function summarizeDebugText(value, limit) {
@@ -173,7 +266,7 @@
   }
 
   function getCalloutMarkdownType(snap) {
-    var emojiId = String(snap && snap.emoji_id || '').trim().toLowerCase();
+    var emojiId = normalizeEmojiId(snap && snap.emoji_id);
 
     if (emojiId === 'warning') return 'WARNING';
     if (emojiId === 'light_bulb' || emojiId === 'rocket' || emojiId === 'key') return 'TIP';
@@ -198,6 +291,32 @@
       src: image.token ? location.origin + '/space/api/box/stream/download/preview/' + image.token + '/?preview_type=16' : '',
       alt: image.name || '',
     };
+  }
+
+  function countDocumentImagesInRoot(root) {
+    if (!root || typeof root.querySelectorAll !== 'function') return 0;
+    return root.querySelectorAll('img[src*="/space/api/box/stream/download/"]').length;
+  }
+
+  function countDocumentImagesInHtml(html) {
+    return (String(html || '').match(/<img\b[^>]+src=["'][^"']*\/space\/api\/box\/stream\/download\//gi) || []).length;
+  }
+
+  function countFallbackEquationNodes(root) {
+    if (!root || typeof root.querySelectorAll !== 'function') return 0;
+    return Math.max(
+      root.querySelectorAll('.editor-kit-equation-block').length,
+      root.querySelectorAll('.docx-equation-block.equation-leaf').length,
+      root.querySelectorAll('.katex').length,
+      root.querySelectorAll('[data-latex]').length,
+      0
+    );
+  }
+
+  function countExtractedImages(content) {
+    content = content || {};
+    var markdownCount = (String(content.text || '').match(/!\[/g) || []).length;
+    return markdownCount > 0 ? markdownCount : countDocumentImagesInHtml(content.html);
   }
 
   function buildTableMatrix(snap, block, extractor, joinParts) {
@@ -789,6 +908,48 @@
     return /^-?[\d.]+(px|em|rem|%)?$/.test(value) ? value : '';
   }
 
+  function normalizeEmojiId(value) {
+    return String(value || '').trim().toLowerCase();
+  }
+
+  // Canonical block-level style metadata shared across rendering and clipboard
+  // paths. This helper only normalizes structured values; presentation defaults
+  // are resolved by the specific block renderer that needs them.
+  function normalizeBlockStyle(snap) {
+    snap = snap || {};
+    return {
+      align: normalizeTextAlign(snap.align),
+      textIndent: normalizeCssLength(snap.text_indent),
+      textColor: normalizeCssColor(snap.text_color),
+      backgroundColor: normalizeCssColor(snap.background_color),
+      borderColor: normalizeCssColor(snap.border_color),
+      imageAlign: normalizeTextAlign(snap.align),
+      calloutEmojiId: normalizeEmojiId(snap.emoji_id),
+    };
+  }
+
+  function resolveImageAlign(normalizedBlockStyle) {
+    return normalizedBlockStyle && normalizedBlockStyle.imageAlign ? normalizedBlockStyle.imageAlign : 'center';
+  }
+
+  function selectPrimaryCalloutContent(snapshotContent, childContent) {
+    var snapshotValue = String(snapshotContent || '').trim();
+    var childValue = String(childContent || '').trim();
+    return childValue || snapshotValue;
+  }
+
+  function extractPlainTextFromHtmlFragment(html) {
+    html = String(html || '').trim();
+    if (!html) return '';
+
+    try {
+      var doc = new DOMParser().parseFromString('<body>' + html + '</body>', 'text/html');
+      return normalizePlainText(doc && doc.body ? (doc.body.textContent || '') : '');
+    } catch (err) {
+      return '';
+    }
+  }
+
   function styleObjectToString(styleObj) {
     return Object.keys(styleObj || {}).filter(function (key) {
       return styleObj[key] !== '' && styleObj[key] != null;
@@ -804,16 +965,26 @@
     return String(prefix || 'feishu_helper') + '_' + syntheticClipboardBlockCounter.toString(36);
   }
 
-  function buildCalloutClipboardMetadata(snap) {
+  function buildCalloutClipboardMetadata(snap, normalizedStyle, options) {
     var blockId = String(snap && (snap.block_id || snap.blockId) || nextSyntheticClipboardId('callout_block'));
     var recordId = String(snap && (snap.record_id || snap.recordId) || nextSyntheticClipboardId('callout_record'));
-    var emojiId = String(snap && snap.emoji_id || '');
-    var backgroundColor = normalizeCssColor(snap && snap.background_color || '');
-    var borderColor = normalizeCssColor(snap && snap.border_color || '');
-    var textColor = normalizeCssColor(snap && snap.text_color || '');
-    var align = normalizeTextAlign(snap && snap.align || '');
-    var text = decodeBlockText(snap || {});
-    var calloutType = getCalloutMarkdownType(snap || {});
+    var normalizedBlockStyle = normalizedStyle || normalizeBlockStyle(snap);
+    var normalizedStyleMetadata = {
+      align: normalizedBlockStyle.align,
+      textIndent: normalizedBlockStyle.textIndent,
+      textColor: normalizedBlockStyle.textColor,
+      backgroundColor: normalizedBlockStyle.backgroundColor,
+      borderColor: normalizedBlockStyle.borderColor,
+      imageAlign: normalizedBlockStyle.imageAlign,
+      calloutEmojiId: normalizedBlockStyle.calloutEmojiId,
+    };
+    var emojiId = normalizedBlockStyle.calloutEmojiId;
+    var backgroundColor = normalizedBlockStyle.backgroundColor;
+    var borderColor = normalizedBlockStyle.borderColor;
+    var textColor = normalizedBlockStyle.textColor;
+    var align = normalizedBlockStyle.align;
+    var text = selectPrimaryCalloutContent(decodeBlockText(snap || {}), options && options.text);
+    var calloutType = getCalloutMarkdownType({ emoji_id: emojiId });
     var snapshot = {
       type: 'callout',
       emoji_id: emojiId,
@@ -822,6 +993,7 @@
       text_color: textColor,
       align: align,
       callout_type: calloutType,
+      normalizedStyle: normalizedStyleMetadata,
     };
 
     if (text) snapshot.text = text;
@@ -839,6 +1011,7 @@
         border_color: borderColor,
         text_color: textColor,
         align: align,
+        normalizedStyle: normalizedStyleMetadata,
         snapshot: snapshot,
       }),
       metaBlockProps: JSON.stringify({
@@ -854,6 +1027,7 @@
             align: align,
             calloutType: calloutType,
             text: text,
+            normalizedStyle: normalizedStyleMetadata,
           },
         },
       }),
@@ -905,17 +1079,15 @@
     return styleObjectToString(style);
   }
 
-  function buildBlockStyle(baseStyle, snap, extraStyle) {
+  function buildBlockStyle(baseStyle, snap, extraStyle, normalizedStyle, options) {
+    options = options || {};
     var style = mergeStyleStrings(baseStyle, extraStyle);
-    var align = normalizeTextAlign(snap && snap.align);
-    var indent = normalizeCssLength(snap && snap.text_indent);
-    var bgColor = normalizeCssColor(snap && snap.background_color);
-    var textColor = normalizeCssColor(snap && snap.text_color);
+    var normalizedBlockStyle = normalizedStyle || normalizeBlockStyle(snap);
     var dynamicStyle = styleObjectToString({
-      'text-align': align,
-      'text-indent': indent,
-      'background-color': bgColor,
-      color: textColor,
+      'text-align': options.applyAlign === false ? '' : normalizedBlockStyle.align,
+      'text-indent': options.applyTextIndent === false ? '' : normalizedBlockStyle.textIndent,
+      'background-color': options.applyBackgroundColor === false ? '' : normalizedBlockStyle.backgroundColor,
+      color: options.applyTextColor === false ? '' : normalizedBlockStyle.textColor,
     });
     return mergeStyleStrings(style, dynamicStyle);
   }
@@ -1505,9 +1677,9 @@
     return '<html><head><meta charset="utf-8"></head><body><!--StartFragment--><div data-feishu-helper="true">' + fragment + '</div><!--EndFragment--></body></html>';
   }
 
-  function renderListItemHtml(kind, text, childHtml, snap) {
-    var liStyle = buildBlockStyle('', snap, '');
-    var pStyle = buildBlockStyle('margin:0;', snap, '');
+  function renderListItemHtml(kind, text, childHtml, snap, normalizedStyle) {
+    var liStyle = buildBlockStyle('', snap, '', normalizedStyle);
+    var pStyle = buildBlockStyle('margin:0;', snap, '', normalizedStyle);
     var textHtml = text ? '<p style="' + escapeAttr(pStyle) + '">' + text + '</p>' : '';
     if (!textHtml && !childHtml) return '';
     return '<li data-feishu-list="' + kind + '"' + (liStyle ? ' style="' + escapeAttr(liStyle) + '"' : '') + '>' + textHtml + childHtml + '</li>';
@@ -1517,49 +1689,54 @@
     var type = snap.type;
     var text = decodeBlockHtml(snap);
     var childHtml = childHtmlArr ? finalizeHtmlFragment(childHtmlArr.join('\n')) : '';
+    var normalizedBlockStyle = normalizeBlockStyle(snap);
     var headingTag = getHeadingTagName(type);
 
     if (headingTag) {
-      return wrapWithStyleTag(headingTag, buildBlockStyle(DEFAULT_HEADING_STYLE, snap, ''), text);
+      return wrapWithStyleTag(headingTag, buildBlockStyle(DEFAULT_HEADING_STYLE, snap, '', normalizedBlockStyle), text);
     }
 
     switch (type) {
       case 'text':
-        if (childHtml && text) return '<p style="' + escapeAttr(buildBlockStyle(DEFAULT_PARAGRAPH_STYLE, snap, '')) + '">' + text + '</p>' + childHtml;
+        if (childHtml && text) return '<p style="' + escapeAttr(buildBlockStyle(DEFAULT_PARAGRAPH_STYLE, snap, '', normalizedBlockStyle)) + '">' + text + '</p>' + childHtml;
         if (childHtml) return childHtml;
-        return '<p style="' + escapeAttr(buildBlockStyle(DEFAULT_PARAGRAPH_STYLE, snap, '')) + '">' + text + '</p>';
+        return '<p style="' + escapeAttr(buildBlockStyle(DEFAULT_PARAGRAPH_STYLE, snap, '', normalizedBlockStyle)) + '">' + text + '</p>';
       case 'ordered':
-        return renderListItemHtml('ordered', text, childHtml, snap);
+        return renderListItemHtml('ordered', text, childHtml, snap, normalizedBlockStyle);
       case 'bullet':
-        return renderListItemHtml('bullet', text, childHtml, snap);
+        return renderListItemHtml('bullet', text, childHtml, snap, normalizedBlockStyle);
       case 'todo':
-        return renderListItemHtml('bullet', (snap.checked ? '☑ ' : '☐ ') + text, childHtml, snap);
+        return renderListItemHtml('bullet', (snap.checked ? '☑ ' : '☐ ') + text, childHtml, snap, normalizedBlockStyle);
       case 'divider': return '<hr style="border:none;border-top:1px solid #d0d7de;margin:24px 0;">';
       case 'code':
         var lang = (snap.language || snap.lang || '').replace(/^plain_text$/, '');
-        return '<pre style="' + escapeAttr(buildBlockStyle('margin:0.75em 0;background:#f6f8fa;padding:12px 16px;border-radius:8px;overflow:auto;white-space:pre-wrap;', snap, '')) + '"><code' + (lang ? ' class="language-' + escapeAttr(lang) + '"' : '') + ' style="font-family:ui-monospace,SFMono-Regular,Menlo,monospace;">' + escapeHtml(decodeBlockText(snap)) + '</code></pre>';
+        return '<pre style="' + escapeAttr(buildBlockStyle('margin:0.75em 0;background:#f6f8fa;padding:12px 16px;border-radius:8px;overflow:auto;white-space:pre-wrap;', snap, '', normalizedBlockStyle)) + '"><code' + (lang ? ' class="language-' + escapeAttr(lang) + '"' : '') + ' style="font-family:ui-monospace,SFMono-Regular,Menlo,monospace;">' + escapeHtml(decodeBlockText(snap)) + '</code></pre>';
       case 'image':
         var imageAsset = getImageAssetInfo(snap.image);
         var caption = '';
-        var imageAlign = normalizeTextAlign(snap.align) || 'center';
+        var imageAlign = resolveImageAlign(normalizedBlockStyle);
         var imageMargin = imageAlign === 'left' ? 'margin:0 auto 0 0;' : imageAlign === 'right' ? 'margin:0 0 0 auto;' : 'margin:0 auto;';
         if (snap.image && snap.image.caption && snap.image.caption.text) {
           var capText = decodeBlockHtml({ text: snap.image.caption.text });
           if (capText) caption = '<figcaption style="margin-top:8px;color:#57606a;font-size:13px;">' + capText + '</figcaption>';
         }
-        return '<figure style="' + escapeAttr(buildBlockStyle('margin:1em 0;text-align:' + imageAlign + ';', snap, '')) + '"><img src="' + escapeAttr(imageAsset.src) + '" alt="' + escapeAttr(imageAsset.alt) + '" style="max-width:100%;height:auto;display:block;' + imageMargin + '" />' + caption + '</figure>';
+        return '<figure style="' + escapeAttr(buildBlockStyle('margin:1em 0;text-align:' + imageAlign + ';', snap, '', normalizedBlockStyle, { applyAlign: false })) + '"><img src="' + escapeAttr(imageAsset.src) + '" alt="' + escapeAttr(imageAsset.alt) + '" style="max-width:100%;height:auto;display:block;' + imageMargin + '" />' + caption + '</figure>';
       case 'callout':
-        var emoji = getEmoji(snap.emoji_id);
-        var bgColor = snap.background_color || '';
-        var borderColor = snap.border_color || '';
-        var calloutMeta = buildCalloutClipboardMetadata(snap);
+        var emoji = getEmoji(normalizedBlockStyle.calloutEmojiId);
+        var bgColor = normalizedBlockStyle.backgroundColor;
+        var borderColor = normalizedBlockStyle.borderColor;
+        var calloutTextHtml = text ? '<p style="margin:0;">' + text + '</p>' : '';
+        var calloutBodyHtml = selectPrimaryCalloutContent(calloutTextHtml, childHtml);
+        var calloutMeta = buildCalloutClipboardMetadata(snap, normalizedBlockStyle, {
+          text: selectPrimaryCalloutContent(text, extractPlainTextFromHtmlFragment(childHtml)),
+        });
         var containerStyle = buildBlockStyle('padding:12px 16px;border-radius:8px;margin:0.75em 0;', snap, styleObjectToString({
-          border: normalizeCssColor(borderColor) ? '1px solid ' + normalizeCssColor(borderColor) : '',
-          background: normalizeCssColor(bgColor),
-        }));
-        return '<div class="block docx-callout-block callout-container" data-block-type="callout" data-block-id="' + escapeAttr(calloutMeta.blockId) + '" data-record-id="' + escapeAttr(calloutMeta.recordId) + '" data-emoji-id="' + escapeAttr(snap.emoji_id || '') + '" data-lark-record-data="' + escapeAttr(calloutMeta.recordData) + '" data-meta-block-props="' + escapeAttr(calloutMeta.metaBlockProps) + '"' + (containerStyle ? ' style="' + escapeAttr(containerStyle) + '"' : '') + '><div class="callout-block">' + (emoji ? '<span>' + emoji + '</span> ' : '') + childHtml + '</div></div>';
+          border: borderColor ? '1px solid ' + borderColor : '',
+          background: bgColor,
+        }), normalizedBlockStyle);
+        return '<div class="block docx-callout-block callout-container" data-block-type="callout" data-block-id="' + escapeAttr(calloutMeta.blockId) + '" data-record-id="' + escapeAttr(calloutMeta.recordId) + '" data-emoji-id="' + escapeAttr(normalizedBlockStyle.calloutEmojiId) + '" data-lark-record-data="' + escapeAttr(calloutMeta.recordData) + '" data-meta-block-props="' + escapeAttr(calloutMeta.metaBlockProps) + '"' + (containerStyle ? ' style="' + escapeAttr(containerStyle) + '"' : '') + '><div class="callout-block">' + (emoji ? '<span>' + emoji + '</span> ' : '') + calloutBodyHtml + '</div></div>';
       case 'quote_container':
-        return '<blockquote style="margin:0.75em 0;border-left:4px solid #d0d7de;padding-left:1em;color:#57606a;">' + childHtml + '</blockquote>';
+        return '<blockquote style="' + escapeAttr(buildBlockStyle('margin:0.75em 0;border-left:4px solid #d0d7de;padding-left:1em;color:#57606a;', snap, '', normalizedBlockStyle)) + '">' + childHtml + '</blockquote>';
       case 'grid':
         return '<div style="display:flex;gap:12px;">' + childHtml + '</div>';
       case 'grid_column':
@@ -1626,8 +1803,8 @@
       case 'callout':
         var calloutType = getCalloutMarkdownType(snap);
         var calloutLines = ['[!' + calloutType + ']'];
-        if (text) calloutLines.push(text);
-        if (childMd) calloutLines.push(childMd);
+        var calloutContent = selectPrimaryCalloutContent(text, childMd);
+        if (calloutContent) calloutLines.push(calloutContent);
         return renderMarkdownBlockquote(calloutLines.join('\n'));
       case 'quote_container':
         return renderMarkdownBlockquote(childMd);
@@ -1682,32 +1859,87 @@
 
   function extractVisibleDomFallback() {
     var root = getContentRootElement() || document.querySelector(EDITABLE_SELECTOR);
-    if (!root) return null;
+    if (!root) {
+      updateLastExtractionDebug({
+        mode: 'dom-fallback',
+        reason: 'missing-content-root',
+        href: location.href,
+        readyState: document.readyState,
+        hasContentRoot: false,
+        hasEditorAPI: !!getEditorAPI(),
+        hasStructService: !!getStructService(),
+        hasRootBlock: !!(getStructService() && getStructService().rootBlock),
+      });
+      return null;
+    }
 
     var text = normalizePlainText(root.innerText || root.textContent || '');
     var html = finalizeHtmlFragment(root.innerHTML || '');
-    if (!text && !html) return null;
+    var documentImageCount = countDocumentImagesInRoot(root);
+    var fallbackEquationCount = countFallbackEquationNodes(root) || (text.match(/\$/g) || []).length;
+    if (!text && !html) {
+      updateLastExtractionDebug({
+        mode: 'dom-fallback',
+        reason: 'empty-dom-content',
+        href: location.href,
+        readyState: document.readyState,
+        hasContentRoot: true,
+        contentRootTag: String(root.tagName || ''),
+        contentRootTextLength: 0,
+        contentRootHtmlLength: 0,
+        contentRootImageCount: documentImageCount,
+        contentRootMathLikeCount: root.querySelectorAll('math, mjx-container, [data-latex], .katex, [class*="equation"], [class*="formula"]').length,
+      });
+      return null;
+    }
 
     var blockCount = text ? text.split('\n').filter(function (line) {
       return line.trim();
     }).length : 0;
 
-    return {
+    var result = {
       html: html || '<p>' + escapeHtml(text).replace(/\n/g, '<br>') + '</p>',
       text: text,
       blockCount: Math.max(1, blockCount),
-      equationCount: (text.match(/\$/g) || []).length,
+      equationCount: fallbackEquationCount,
     };
+
+    result.extractionDebug = updateLastExtractionDebug({
+      mode: 'dom-fallback',
+      reason: 'missing-struct-service-or-root-block',
+      href: location.href,
+      readyState: document.readyState,
+      hasContentRoot: true,
+      contentRootTag: String(root.tagName || ''),
+      contentRootTextLength: text.length,
+      contentRootHtmlLength: html.length,
+      contentRootImageCount: documentImageCount,
+      contentRootMathLikeCount: root.querySelectorAll('math, mjx-container, [data-latex], .katex, [class*="equation"], [class*="formula"]').length,
+      hasEditorAPI: !!getEditorAPI(),
+      hasStructService: !!getStructService(),
+      hasRootBlock: !!(getStructService() && getStructService().rootBlock),
+      fallbackBlockCount: Math.max(1, blockCount),
+      fallbackEquationCount: result.equationCount,
+      fallbackHtmlImageCount: countDocumentImagesInHtml(result.html),
+      fallbackMarkdownImageCount: (text.match(/!\[/g) || []).length,
+      textPreview: summarizeDebugText(text, 240),
+    });
+
+    return result;
   }
 
   function extractFullDoc() {
     var ss = getStructService();
     if (!ss || !ss.rootBlock) return extractVisibleDomFallback();
 
+    var root = getContentRootElement() || document.querySelector(EDITABLE_SELECTOR);
     var htmlParts = [];
     var mdParts = [];
     var blockCount = 0;
     var equationCount = 0;
+    var blockTypeCounts = {};
+    var imageBlockCount = 0;
+    var equationBlockCount = 0;
 
     function processBlock(block, depth) {
       if (!block || depth > MAX_BLOCK_DEPTH) return;
@@ -1722,10 +1954,15 @@
           return;
         }
 
+        blockTypeCounts[type] = (blockTypeCounts[type] || 0) + 1;
         var childContent = collectRenderedChildBlocks(block, depth, processBlockInner);
 
         var decoded = decodeBlockText(snap);
-        if (decoded.includes('$')) equationCount++;
+        if (type === 'image') imageBlockCount++;
+        if (decoded.includes('$')) {
+          equationCount++;
+          equationBlockCount++;
+        }
 
         var html = blockToHtml(snap, block, childContent.html);
         var md = blockToMarkdown(snap, block, childContent.md);
@@ -1755,17 +1992,87 @@
 
     processBlock(ss.rootBlock, 0);
 
-    return {
-      html: finalizeHtmlFragment(htmlParts.join('\n')),
-      text: normalizePlainText(mdParts.join('\n')),
+    var finalHtml = finalizeHtmlFragment(htmlParts.join('\n'));
+    var finalText = normalizePlainText(mdParts.join('\n'));
+    var result = {
+      html: finalHtml,
+      text: finalText,
       blockCount: blockCount,
       equationCount: equationCount,
     };
+
+    result.extractionDebug = updateLastExtractionDebug({
+      mode: 'struct',
+      reason: 'struct-service',
+      href: location.href,
+      readyState: document.readyState,
+      hasContentRoot: !!root,
+      contentRootTag: root ? String(root.tagName || '') : '',
+      contentRootTextLength: root ? String(root.innerText || root.textContent || '').length : 0,
+      contentRootHtmlLength: root ? String(root.innerHTML || '').length : 0,
+      contentRootImageCount: root ? countDocumentImagesInRoot(root) : 0,
+      contentRootMathLikeCount: root ? root.querySelectorAll('math, mjx-container, [data-latex], .katex, [class*="equation"], [class*="formula"]').length : 0,
+      hasEditorAPI: !!getEditorAPI(),
+      hasStructService: true,
+      hasRootBlock: true,
+      rootBlockType: ss.rootBlock && ss.rootBlock.record && ss.rootBlock.record.snapshot ? String(ss.rootBlock.record.snapshot.type || '') : '',
+      rootChildCount: getBlockChildren(ss.rootBlock).length,
+      blockCount: blockCount,
+      equationCount: equationCount,
+      equationBlockCount: equationBlockCount,
+      imageBlockCount: imageBlockCount,
+      markdownImageCount: (finalText.match(/!\[/g) || []).length,
+      htmlImageCount: countDocumentImagesInHtml(finalHtml),
+      blockTypeCounts: blockTypeCounts,
+      textPreview: summarizeDebugText(finalText, 240),
+    });
+
+    return result;
   }
 
   var DB_NAME = '__feishu_helper_db__';
   var DB_STORE = 'paste';
   var DB_KEY = 'pending';
+  var lastExtractionDebug = null;
+  var imageConversionStatus = {
+    state: 'idle',
+    done: 0,
+    total: 0,
+    updatedAt: 0,
+    error: '',
+  };
+  var lastPendingPasteTimestamp = 0;
+
+  function updateImageConversionStatus(patch) {
+    imageConversionStatus = Object.assign({}, imageConversionStatus, patch || {}, {
+      updatedAt: Date.now(),
+    });
+    // Sync to DOM for cross-context visibility (AppleScript JS context).
+    try {
+      document.documentElement.setAttribute('data-feishu-img-conv-status', JSON.stringify(imageConversionStatus));
+    } catch (e) {}
+    return imageConversionStatus;
+  }
+
+  function getImageConversionStatus() {
+    return Object.assign({}, imageConversionStatus);
+  }
+
+  function updateLastExtractionDebug(summary) {
+    lastExtractionDebug = Object.assign({
+      ts: Date.now(),
+    }, summary || {});
+    console.info('[Feishu Helper] extraction debug', lastExtractionDebug);
+    // Sync to DOM for cross-context visibility (AppleScript JS context).
+    try {
+      document.documentElement.setAttribute('data-feishu-extraction-debug-ts', String(lastExtractionDebug.ts));
+    } catch (e) {}
+    return lastExtractionDebug;
+  }
+
+  function getLastExtractionDebug() {
+    return lastExtractionDebug ? Object.assign({}, lastExtractionDebug) : null;
+  }
 
   function openDB() {
     return new Promise(function (resolve, reject) {
@@ -1804,6 +2111,14 @@
     return openDB().then(function (db) {
       return new Promise(function (resolve, reject) {
         data.ts = Date.now();
+        lastPendingPasteTimestamp = data.ts;
+        // Write to a DOM attribute so AppleScript's execute javascript
+        // (which runs in a separate JS context) can read the value.
+        // window properties are NOT shared across Chrome's isolated worlds,
+        // but DOM attributes are.
+        try {
+          document.documentElement.setAttribute('data-feishu-pending-paste-ts', String(data.ts));
+        } catch (e) {}
         var tx = db.transaction(DB_STORE, 'readwrite');
         tx.objectStore(DB_STORE).put(data, DB_KEY);
         tx.oncomplete = function () { resolve(); };
@@ -1835,16 +2150,30 @@
 
   function convertImagesToBase64(html) {
     var imgUrls = [];
-    var urlRegex = /src="(https?:\/\/[^"]+\/space\/api\/box\/stream\/download\/preview\/[^"]+)"/g;
+    var urlRegex = /src="(https?:\/\/[^"]+\/space\/api\/box\/stream\/download\/[^"]+)"/g;
     var match;
     while ((match = urlRegex.exec(html)) !== null) {
       imgUrls.push({ url: match[1], full: match[0] });
     }
 
-    if (imgUrls.length === 0) return Promise.resolve(html);
+    if (imgUrls.length === 0) {
+      updateImageConversionStatus({
+        state: 'no-images',
+        done: 0,
+        total: 0,
+        error: '',
+      });
+      return Promise.resolve(html);
+    }
 
     var done = 0;
     var total = imgUrls.length;
+    updateImageConversionStatus({
+      state: 'running',
+      done: 0,
+      total: total,
+      error: '',
+    });
 
     showToast('📷 转换图片中 0/' + total);
 
@@ -1852,6 +2181,12 @@
       return function () {
         return fetchImageAsBase64(item.url).then(function (base64) {
           done++;
+          updateImageConversionStatus({
+            state: done >= total ? 'done' : 'running',
+            done: done,
+            total: total,
+            error: '',
+          });
           showToast('📷 转换图片中 ' + done + '/' + total);
           if (base64) {
             html = html.replace(item.full, 'src="' + base64 + '"');
@@ -1871,7 +2206,21 @@
     }
 
     return chain.then(function () {
+      updateImageConversionStatus({
+        state: 'done',
+        done: total,
+        total: total,
+        error: '',
+      });
       return html;
+    }).catch(function (error) {
+      updateImageConversionStatus({
+        state: 'error',
+        done: done,
+        total: total,
+        error: String(error && error.message ? error.message : error),
+      });
+      throw error;
     });
   }
 
@@ -1964,10 +2313,10 @@
             clipboardHtml: payload.html,
             title: docTitle,
           }).then(function () {
-            var imgCount = (content.text.match(/!\[/g) || []).length;
+            var imgCount = countExtractedImages(content);
             var inlinedImgCount = (payload.html.match(/data:image/g) || []).length;
             showToast('✅ 已提取 ' + content.blockCount + ' 块 · ' + content.equationCount + ' 公式 · ' + imgCount + ' 图片 · 已缓存 ' + inlinedImgCount + ' 张', 3200);
-            resolve({
+            var result = {
               title: docTitle,
               blockCount: Number(content.blockCount || 0),
               equationCount: Number(content.equationCount || 0),
@@ -1976,13 +2325,41 @@
               textLen: String(content.text || '').length,
               htmlLen: String(content.html || '').length,
               clipboardHtmlLen: String(payload.html || '').length,
-            });
+              extractionDebug: content.extractionDebug || getLastExtractionDebug(),
+            };
+            // Sync extraction result to DOM for cross-context visibility.
+            try {
+              var snap = captureValidationSnapshot();
+              document.documentElement.setAttribute('data-feishu-extraction-result', JSON.stringify({
+                title: result.title,
+                blockCount: result.blockCount,
+                equationCount: result.equationCount,
+                imageCount: result.imageCount,
+                inlinedImageCount: result.inlinedImageCount,
+                textLen: result.textLen,
+                htmlLen: result.htmlLen,
+                clipboardHtmlLen: result.clipboardHtmlLen,
+                payloadError: false,
+                ts: Date.now(),
+              }));
+              if (snap) {
+                document.documentElement.setAttribute('data-feishu-validation-snapshot', JSON.stringify({
+                  title: snap.title || '',
+                  blockCount: Number(snap.blockCount || 0),
+                  equationCount: Number(snap.equationCount || 0),
+                  textLength: Number(snap.textLength || 0),
+                  htmlLength: Number(snap.htmlLength || 0),
+                  styleSummary: snap.styleSummary || null,
+                }));
+              }
+            } catch (e) {}
+            resolve(result);
           });
         }).catch(function () {
           setPendingPaste({ html: content.html, text: content.text, title: docTitle }).then(function () {
-            var imgCount = (content.text.match(/!\[/g) || []).length;
+            var imgCount = countExtractedImages(content);
             showToast('⚠️ 内容已提取，但图片预处理失败，粘贴时可能退回纯文本 · ' + imgCount + ' 图片', 3500);
-            resolve({
+            var result = {
               title: docTitle,
               blockCount: Number(content.blockCount || 0),
               equationCount: Number(content.equationCount || 0),
@@ -1992,7 +2369,35 @@
               htmlLen: String(content.html || '').length,
               clipboardHtmlLen: 0,
               payloadError: true,
-            });
+              extractionDebug: content.extractionDebug || getLastExtractionDebug(),
+            };
+            // Sync extraction result to DOM for cross-context visibility.
+            try {
+              var snap = captureValidationSnapshot();
+              document.documentElement.setAttribute('data-feishu-extraction-result', JSON.stringify({
+                title: result.title,
+                blockCount: result.blockCount,
+                equationCount: result.equationCount,
+                imageCount: result.imageCount,
+                inlinedImageCount: result.inlinedImageCount,
+                textLen: result.textLen,
+                htmlLen: result.htmlLen,
+                clipboardHtmlLen: result.clipboardHtmlLen,
+                payloadError: true,
+                ts: Date.now(),
+              }));
+              if (snap) {
+                document.documentElement.setAttribute('data-feishu-validation-snapshot', JSON.stringify({
+                  title: snap.title || '',
+                  blockCount: Number(snap.blockCount || 0),
+                  equationCount: Number(snap.equationCount || 0),
+                  textLength: Number(snap.textLength || 0),
+                  htmlLength: Number(snap.htmlLength || 0),
+                  styleSummary: snap.styleSummary || null,
+                }));
+              }
+            } catch (e) {}
+            resolve(result);
           });
         });
       }, 50);
@@ -2020,13 +2425,21 @@
     });
   }
 
+  function getPendingPasteTimestamp() {
+    return lastPendingPasteTimestamp;
+  }
+
   function buildRealTestDuplicateDocumentSummary() {
     return duplicateDocumentForAutomation().then(function (summary) {
       return summarizePendingPasteForAutomation().then(function (pendingPaste) {
         var result = {};
+        var validationSnapshot = captureValidationSnapshot();
         Object.keys(summary || {}).forEach(function (key) {
           result[key] = summary[key];
         });
+        if (validationSnapshot) {
+          result.validationSnapshot = validationSnapshot;
+        }
         if (pendingPaste) {
           result.pendingPaste = pendingPaste;
         } else {
@@ -2037,16 +2450,111 @@
     });
   }
 
-  function onAutomationRequest(event) {
-    var detail = event && event.detail ? event.detail : {};
+  function collectValidationStyleSummary() {
+    var summary = {
+      blockCount: 0,
+      countsByType: {},
+      blocks: [],
+    };
+    var ss = getStructService();
+    if (!ss || !ss.rootBlock) return summary;
+
+    function walk(block, depth) {
+      if (!block || depth > MAX_BLOCK_DEPTH) return;
+      if (block.record && block.record.snapshot) {
+        var snap = block.record.snapshot;
+        if (snap.type && snap.type !== 'page') {
+          var normalizedStyle = normalizeBlockStyle(snap);
+          summary.blockCount += 1;
+          summary.countsByType[snap.type] = (summary.countsByType[snap.type] || 0) + 1;
+          summary.blocks.push({
+            type: String(snap.type || ''),
+            align: String(normalizedStyle.align || ''),
+            textIndent: String(normalizedStyle.textIndent || ''),
+            textColor: String(normalizedStyle.textColor || ''),
+            backgroundColor: String(normalizedStyle.backgroundColor || ''),
+            borderColor: String(normalizedStyle.borderColor || ''),
+            calloutEmojiId: String(normalizedStyle.calloutEmojiId || ''),
+            imageAlign: String(normalizedStyle.imageAlign || ''),
+          });
+        }
+      }
+      getBlockChildren(block).forEach(function (child) {
+        walk(child, depth + 1);
+      });
+    }
+
+    walk(ss.rootBlock, 0);
+    return summary;
+  }
+
+  function captureValidationSnapshot() {
+    var content = extractFullDoc();
+    if (!content) {
+      return null;
+    }
+
+    var snap = {
+      title: getDocumentTitle(),
+      text: String(content.text || ''),
+      textLength: String(content.text || '').length,
+      htmlLength: String(content.html || '').length,
+      blockCount: Number(content.blockCount || 0),
+      equationCount: Number(content.equationCount || 0),
+      extractionDebug: content.extractionDebug || getLastExtractionDebug(),
+      styleSummary: collectValidationStyleSummary(),
+    };
+    // Sync to DOM for cross-context visibility (AppleScript JS context).
+    try {
+      document.documentElement.setAttribute('data-feishu-validation-snapshot', JSON.stringify({
+        title: snap.title || '',
+        blockCount: Number(snap.blockCount || 0),
+        equationCount: Number(snap.equationCount || 0),
+        textLength: Number(snap.textLength || 0),
+        htmlLength: Number(snap.htmlLength || 0),
+        styleSummary: snap.styleSummary || null,
+      }));
+    } catch (e) {}
+    return snap;
+  }
+
+  function preparePendingPasteForNativePaste() {
+    return getPendingPaste().then(function (pendingPaste) {
+      if (!pendingPaste) {
+        throw new Error('请先在源文档按 Cmd+Shift+D 提取');
+      }
+
+      return resolvePastePayload(pendingPaste).then(function (payload) {
+        return writeClipboardPayload(payload).then(function () {
+          return {
+            title: String(pendingPaste.title || ''),
+            textLength: String(payload && payload.text || '').length,
+            htmlLength: String(payload && payload.html || '').length,
+            requiresNativePaste: payloadRequiresPasteParsing(payload),
+            canAutoDispatch: shouldAutoDispatchPastePayload(payload),
+          };
+        });
+      });
+    });
+  }
+
+  function runAutomationAction(action) {
     var handlers = {
       duplicateDocument: duplicateDocumentForAutomation,
       realTestDuplicateDocument: buildRealTestDuplicateDocumentSummary,
     };
-    var handler = handlers[detail.action];
-    if (!handler || !detail.requestId) return;
+    var handler = handlers[String(action || '')];
+    if (!handler) {
+      return Promise.reject(new Error('Unsupported automation action: ' + String(action || '')));
+    }
+    return handler();
+  }
 
-    handler().then(function (summary) {
+  function onAutomationRequest(event) {
+    var detail = event && event.detail ? event.detail : {};
+    if (!detail.requestId) return;
+
+    runAutomationAction(detail.action).then(function (summary) {
       dispatchAutomationResult({
         requestId: detail.requestId,
         status: 'success',
@@ -2228,18 +2736,36 @@
     return buildClipboardPayload(content);
   }
 
-  function payloadRequiresPasteParsing(payload) {
+  function getPastePayloadHandlingMode(payload) {
     var text = payload && payload.text ? payload.text : '';
     var html = payload && payload.html ? payload.html : '';
     var source = text + '\n' + html;
+    var hasFeishuCalloutHtml = payloadHasFeishuCalloutHtml(payload);
+    var requiresNativeParsing = !hasFeishuCalloutHtml && (
+      /^\s*>\s*\[!(NOTE|WARNING|TIP|CAUTION|IMPORTANT|SUCCESS|INFO)\]/mi.test(source) ||
+      /(^|[^\\])\$\$?[\s\S]+?\$\$?/.test(source) ||
+      /\\\([\s\S]+?\\\)/.test(source) ||
+      /\\\[[\s\S]+?\\\]/.test(source)
+    );
 
     // Any LaTeX-like marker should go through Feishu's native paste parser.
     // Direct DOM insertion preserves the literal "$...$" text but does not
     // trigger the editor's formula conversion, which is most visible in lists.
-    return /^\s*>\s*\[!(NOTE|WARNING|TIP|CAUTION|IMPORTANT|SUCCESS|INFO)\]/mi.test(source) ||
-      /(^|[^\\])\$\$?[\s\S]+?\$\$?/.test(source) ||
-      /\\\([\s\S]+?\\\)/.test(source) ||
-      /\\\[[\s\S]+?\\\]/.test(source);
+    if (hasFeishuCalloutHtml) {
+      return {
+        mode: 'dispatchPasteEvent',
+        requiresNativeParsing: false,
+      };
+    }
+
+    return {
+      mode: requiresNativeParsing ? 'nativePaste' : 'autoDispatch',
+      requiresNativeParsing: requiresNativeParsing,
+    };
+  }
+
+  function payloadRequiresPasteParsing(payload) {
+    return getPastePayloadHandlingMode(payload).requiresNativeParsing;
   }
 
   function payloadHasFeishuCalloutHtml(payload) {
@@ -2368,7 +2894,7 @@
   }
 
   function shouldAutoDispatchPastePayload(payload) {
-    return payloadHasFeishuCalloutHtml(payload) || !payloadRequiresPasteParsing(payload);
+    return getPastePayloadHandlingMode(payload).mode !== 'nativePaste';
   }
 
   function describePasteMode(mode) {
@@ -2601,6 +3127,7 @@
   var nativeImageMenuContext = null;
   var nativeImageMenuProxy = null;
   var nativeImageMenuCleanupTimer = 0;
+  var startImageMenuObserverTimer = 0;
 
   function cleanupNativeImageMenuBypass() {
     nativeImageMenuContext = null;
@@ -2752,52 +3279,64 @@
     }
   }
 
-  document.addEventListener('pointerdown', function (e) {
+  function onImagePointerdown(e) {
     if (bypassSiteImageContextMenu(e)) return;
     cleanupNativeImageMenuBypass();
-  }, true);
+  }
 
-  document.addEventListener('mousedown', function (e) {
+  function onImageMousedown(e) {
     bypassSiteImageContextMenu(e);
-  }, true);
+  }
 
-  document.addEventListener('mouseup', function (e) {
+  function onImageMouseup(e) {
     if (!nativeImageMenuContext || !isContextMenuGesture(e)) return;
     e.stopImmediatePropagation();
     e.stopPropagation();
     scheduleNativeImageMenuCleanup();
-  }, true);
+  }
 
-  document.addEventListener('contextmenu', function (e) {
+  function onImageContextmenu(e) {
     if (bypassSiteImageContextMenu(e)) return;
     cleanupNativeImageMenuBypass();
     pendingImageContextInfo = getImageInfoFromTarget(e.target);
     setTimeout(tryInjectImageMenu, 0);
     setTimeout(tryInjectImageMenu, 120);
-  }, true);
+  }
 
   var imageMenuObserver = new MutationObserver(function () {
     tryInjectImageMenu();
   });
+  registerRuntimeDisposer(function () {
+    imageMenuObserver.disconnect();
+  });
 
   function startImageMenuObserver() {
     if (!document.documentElement) {
-      setTimeout(startImageMenuObserver, 0);
+      startImageMenuObserverTimer = setTimeout(startImageMenuObserver, 0);
       return;
     }
+    startImageMenuObserverTimer = 0;
 
     imageMenuObserver.observe(document.documentElement, {
       childList: true,
       subtree: true,
     });
   }
+  registerRuntimeDisposer(function () {
+    if (startImageMenuObserverTimer) {
+      clearTimeout(startImageMenuObserverTimer);
+      startImageMenuObserverTimer = 0;
+    }
+    cleanupNativeImageMenuBypass();
+    pendingImageContextInfo = null;
+  });
 
   startImageMenuObserver();
 
-  document.addEventListener('click', function () {
+  function onDocumentClick() {
     cleanupNativeImageMenuBypass();
     pendingImageContextInfo = null;
-  }, true);
+  }
 
   function onEscapeKeydown(e) {
     if (e.key === 'Escape') {
@@ -2806,9 +3345,9 @@
     }
   }
 
-  document.addEventListener('scroll', function () {
+  function onDocumentScroll() {
     cleanupNativeImageMenuBypass();
-  }, true);
+  }
 
   function onShortcutKeydown(e) {
     if (!(e.metaKey || e.ctrlKey) || !e.shiftKey) return;
@@ -2838,11 +3377,42 @@
     }
   }
 
-  window.addEventListener('keydown', onEscapeKeydown, true);
-  window.addEventListener('keydown', onShortcutKeydown, true);
-  window.addEventListener(AUTOMATION_REQUEST_EVENT, onAutomationRequest, true);
+  registerEventListener(document, 'pointerdown', onImagePointerdown, true);
+  registerEventListener(document, 'mousedown', onImageMousedown, true);
+  registerEventListener(document, 'mouseup', onImageMouseup, true);
+  registerEventListener(document, 'contextmenu', onImageContextmenu, true);
+  registerEventListener(document, 'click', onDocumentClick, true);
+  registerEventListener(document, 'scroll', onDocumentScroll, true);
+  registerEventListener(window, 'keydown', onEscapeKeydown, true);
+  registerEventListener(window, 'keydown', onShortcutKeydown, true);
+  registerEventListener(window, AUTOMATION_REQUEST_EVENT, onAutomationRequest, true);
+  // Listen for snapshot capture requests from AppleScript's JS context.
+  // AppleScript cannot call window.__feishuCaptureValidationSnapshot() directly
+  // because it runs in a different Chrome isolated world. Instead, it dispatches
+  // a DOM CustomEvent which IS visible across worlds.
+  registerEventListener(document, 'feishu-capture-snapshot', function () {
+    try { captureValidationSnapshot(); } catch (e) {}
+  }, true);
 
   window.__feishuHelperVersion = SCRIPT_VERSION;
+  // Write a DOM attribute to signal that TM has injected, so AppleScript's
+  // execute javascript (which runs in a separate Chrome isolated world and
+  // cannot see window.__feishuHelperVersion) can detect injection.
+  try {
+    document.documentElement.setAttribute('data-feishu-helper-active', SCRIPT_VERSION);
+  } catch (e) {}
+  // Periodically sync editor ready state to a DOM attribute so AppleScript's
+  // execute javascript (which runs in a separate Chrome isolated world and
+  // cannot see window.__feishu* properties) can detect when the Feishu editor
+  // is ready.  DOM attributes ARE shared across isolated worlds.
+  var _editorStateSyncTimer = setInterval(function () {
+    try {
+      var state = getEditorReadyState();
+      if (state) {
+        document.documentElement.setAttribute('data-feishu-editor-ready-state', JSON.stringify(state));
+      }
+    } catch (e) {}
+  }, 500);
   window.__tampermonkeyScriptDebugExports = function () {
     return {
       name: SCRIPT_NAME,
@@ -2856,13 +3426,38 @@
       exports: {
         extractFullDoc: typeof window.__feishuExtractFullDoc,
         pasteIntoDoc: typeof window.__feishuPasteIntoDoc,
+        preparePendingPasteForNativePaste: typeof window.__feishuPreparePendingPasteForNativePaste,
+        captureValidationSnapshot: typeof window.__feishuCaptureValidationSnapshot,
+        getLastExtractionDebug: typeof window.__feishuGetLastExtractionDebug,
+        getEditorReadyState: typeof window.__feishuGetEditorReadyState,
         debugEditorAPI: typeof window.__feishuDebugEditorAPI,
         captureNextCopy: typeof window.__feishuCaptureNextCopy,
+        runAutomationAction: typeof window.__feishuRunAutomationAction,
       },
     };
   };
   window.__feishuDebugExports = function () {
     return window.__tampermonkeyScriptDebugExports();
+  };
+  window.__feishuRunAutomationAction = function (options) {
+    var action = typeof options === 'string'
+      ? options
+      : options && options.action;
+    return runAutomationAction(action);
+  };
+  window.__feishuGetPendingPasteSummary = summarizePendingPasteForAutomation;
+  window.__feishuGetPendingPasteTimestamp = getPendingPasteTimestamp;
+  window.__feishuGetEditorReadyState = getEditorReadyState;
+  window.__feishuGetLastExtractionDebug = getLastExtractionDebug;
+  window.__feishuGetImageConversionStatus = getImageConversionStatus;
+  window.__feishuResetImageConversionStatus = function () {
+    imageConversionStatus = {
+      state: 'idle',
+      done: 0,
+      total: 0,
+      updatedAt: 0,
+      error: '',
+    };
   };
   window.__feishuGetLastCopyCapture = function () {
     return window.__feishuLastCopyCapture || null;
@@ -2952,6 +3547,7 @@
   window.__feishuPasteIntoDoc = pasteIntoDoc;
   window.__feishuDecodeFeishuAttribsToHtml = decodeFeishuAttribsToHtml;
   window.__feishuDecodeBlockHtml = decodeBlockHtml;
+  window.__feishuNormalizeBlockStyle = normalizeBlockStyle;
   window.__feishuBlockToHtml = blockToHtml;
   window.__feishuNormalizeLatexTextBoundaries = normalizeLatexTextBoundaries;
   window.__feishuNormalizeLatexHtmlTextNodes = normalizeLatexHtmlTextNodes;
@@ -2962,6 +3558,8 @@
   window.__feishuResolvePastePayload = resolvePastePayload;
   window.__feishuPayloadRequiresPasteParsing = payloadRequiresPasteParsing;
   window.__feishuShouldAutoDispatchPastePayload = shouldAutoDispatchPastePayload;
+  window.__feishuPreparePendingPasteForNativePaste = preparePendingPasteForNativePaste;
+  window.__feishuCaptureValidationSnapshot = captureValidationSnapshot;
   window.__feishuExtractInsertionHtml = extractInsertionHtml;
   window.__feishuInsertPayloadIntoEditor = insertPayloadIntoEditor;
   window.__feishuDispatchPastePayload = dispatchPastePayload;

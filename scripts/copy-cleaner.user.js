@@ -15,6 +15,9 @@
 (function () {
   'use strict';
 
+  var SCRIPT_NAME = '复制净化器';
+  var SCRIPT_VERSION = '5.0.0';
+
   function cleanText(text, options) {
     options = options || {};
     var parts = splitByLatex(text);
@@ -780,6 +783,18 @@
     }
   }
 
+  window.__tampermonkeyScriptDebugExports = function () {
+    return {
+      name: SCRIPT_NAME,
+      version: SCRIPT_VERSION,
+      automation: null,
+      exports: {
+        cleanText: typeof window.__copyCleanerCleanText,
+        splitByLatex: typeof window.__copyCleanerSplitByLatex,
+        extractLatex: typeof window.__copyCleanerExtractLatex,
+      },
+    };
+  };
   window.addEventListener('copy', onCopy, true);
   window.addEventListener('keydown', onKeydown, true);
 })();

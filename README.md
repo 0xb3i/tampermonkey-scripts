@@ -4,7 +4,7 @@
 
 ## 脚本列表
 
-### 复制净化器 (Copy Cleaner)
+### 复制净化器
 
 复制时自动清理 AI 生成内容中的格式噪音，并将数学公式提取为 LaTeX 源码。
 
@@ -51,7 +51,7 @@
 
 ---
 
-### 飞书文档助手 (Feishu Helper)
+### 飞书文档助手
 
 解除飞书文档复制限制，提取完整文档内容（含 LaTeX 公式），批量提取图片，创建文档副本。
 
@@ -133,6 +133,148 @@ npm install
 ```bash
 npm test
 ```
+
+### 油猴脚本自动同步 / 自动化测试
+
+仓库里的 `scripts/feishu-helper-profile-runner.js` 现在已经抽成了通用的 Tampermonkey 同步器：
+
+- 读取任意 `.user.js` 的 `@name` / `@version`
+- 自动接管当前已登录的 Chrome 活跃标签页
+- 打开 Tampermonkey `utilities` 导入页并重新安装脚本
+- 自动跳到脚本编辑页，确认最新版本已经生效
+- 可选触发脚本自带的自动化 action，验证真实效果而不是只验证注入成功
+
+#### 通用命令
+
+```bash
+npm run tm:sync -- --script-path scripts/copy-cleaner.user.js
+```
+
+把本地脚本同步到当前登录态 Chrome 的 Tampermonkey。
+
+```bash
+npm run tm:action -- --script-path scripts/feishu-helper.user.js --url "https://bytedance.feishu.cn/docx/..."
+```
+
+同步后自动刷新目标页，并调用脚本声明的默认自动化 action。
+
+#### Feishu 一键真实测试
+
+```bash
+npm run feishu:real-test -- "https://bytedance.feishu.cn/docx/..."
+```
+
+这条命令会执行：本地脚本同步 → Tampermonkey 重装 → 刷新目标文档 → 触发自动化提取 → 输出块数、公式数、图片数、缓存粘贴内容等真实指标。
+
+#### 自定义页面动作（适合 `copy-cleaner` 这类非飞书脚本）
+
+如果脚本没有内建 automation action，也可以自己指定目标 URL，并注入一段页面脚本作为“预期行为”。runner 会在页面加载完成后执行这段脚本，并把返回结果打印出来。
+
+例如给 `copy-cleaner` 做“点击复制按钮后读取剪贴板”的观测：
+
+```bash
+node scripts/feishu-helper-profile-runner.js \
+  --attach-active-chrome \
+  --sync-tampermonkey \
+  --script-path scripts/copy-cleaner.user.js \
+  --url "file:///ABSOLUTE/PATH/tests/fixtures/ai-chat.html" \
+  --page-script-file /ABSOLUTE/PATH/tmp/copy-cleaner-click.js
+```
+
+`copy-cleaner-click.js` 可以这样写：
+
+```js
+await navigator.clipboard.writeText('');
+document.querySelector('#msg1 .copy-btn').click();
+await new Promise((resolve) => setTimeout(resolve, 300));
+return {
+  clipboardText: await navigator.clipboard.readText(),
+  buttonText: document.querySelector('#msg1 .copy-btn').textContent,
+};
+```
+
+如果你想验证“局部选中后按复制快捷键”，也可以把行为写进同一个脚本：
+
+```js
+const content = document.querySelector('#msg1 .content');
+const range = document.createRange();
+range.selectNodeContents(content);
+const selection = window.getSelection();
+selection.removeAllRanges();
+selection.addRange(range);
+document.dispatchEvent(new KeyboardEvent('keydown', {
+  key: 'c',
+  ctrlKey: true,
+  metaKey: true,
+  bubbles: true,
+}));
+await new Promise((resolve) => setTimeout(resolve, 300));
+return {
+  clipboardText: await navigator.clipboard.readText(),
+  selectedText: selection.toString(),
+};
+```
+
+也支持直接内联：
+
+```bash
+node scripts/feishu-helper-profile-runner.js \
+  --attach-active-chrome \
+  --script-path scripts/copy-cleaner.user.js \
+  --url "https://example.com" \
+  --page-script "return { title: document.title };"
+```
+
+#### 让别的脚本复用这套自动化逻辑
+
+只需要在脚本里暴露统一探针：
+
+```js
+window.__tampermonkeyScriptDebugExports = function () {
+  return {
+    name: '脚本名',
+    version: '1.0.0',
+    automation: null,
+    exports: {
+      example: typeof window.__example,
+    },
+  };
+};
+```
+
+如果脚本还希望支持“真实动作测试”，再额外声明 automation contract：
+
+```js
+window.__tampermonkeyScriptDebugExports = function () {
+  return {
+    name: '脚本名',
+    version: '1.0.0',
+    automation: {
+      requestEvent: 'my-script:automation-request',
+      resultEvent: 'my-script:automation-result',
+      defaultAction: 'runPrimaryAction',
+      actions: ['runPrimaryAction'],
+    },
+    exports: {
+      example: typeof window.__example,
+    },
+  };
+};
+```
+
+runner 会优先调用 `--probe-function` 指定的函数；未指定时默认查找 `window.__tampermonkeyScriptDebugExports()`，并兼容旧的 `window.__feishuDebugExports()`。
+
+#### 常用参数
+
+- `--script-path`：要同步的本地 `.user.js` 文件
+- `--url`：同步后要验证的目标页面
+- `--probe-function`：自定义探针函数名
+- `--action`：指定自动化 action 名称；不传时使用脚本声明的 `defaultAction`
+- `--page-script`：直接内联一段页面脚本，执行后返回结果
+- `--page-script-file`：从文件读取页面脚本，适合复杂点击/选区/剪贴板场景
+- `--attach-active-chrome`：复用当前前台 Chrome 登录态
+- `--sync-tampermonkey`：把本地脚本更新进 Tampermonkey
+- `--real-test`：执行脚本声明的默认自动化 action
 
 ### 测试结构
 

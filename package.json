@@ -5,7 +5,13 @@
   "private": true,
   "scripts": {
     "test": "npx playwright test",
-    "test:headed": "npx playwright test --headed"
+    "test:headed": "npx playwright test --headed",
+    "tm:profile": "node scripts/feishu-helper-profile-runner.js",
+    "tm:sync": "node scripts/feishu-helper-profile-runner.js --attach-active-chrome --sync-tampermonkey",
+    "tm:action": "node scripts/feishu-helper-profile-runner.js --attach-active-chrome --sync-tampermonkey --real-test",
+    "feishu:profile": "node scripts/feishu-helper-profile-runner.js",
+    "feishu:sync": "node scripts/feishu-helper-profile-runner.js --attach-active-chrome --sync-tampermonkey",
+    "feishu:real-test": "node scripts/feishu-helper-profile-runner.js --attach-active-chrome --sync-tampermonkey --real-test"
   },
   "devDependencies": {
     "@playwright/test": "^1.59.1"
