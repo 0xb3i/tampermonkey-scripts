@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         飞书文档助手
 // @namespace    https://github.com/tampermonkey-scripts
-// @version      4.2.15
+// @version      4.2.16
 // @description  飞书文档完整复制、图片提取、文档副本（含LaTeX公式）
 // @author       You
 // @match        https://*.feishu.cn/*
@@ -14,8 +14,53 @@
 (function () {
   'use strict';
 
-  var SCRIPT_VERSION = '4.2.15';
+  var SCRIPT_NAME = '飞书文档助手';
+  var SCRIPT_VERSION = '4.2.16';
+  var AUTOMATION_REQUEST_EVENT = 'feishu-helper:automation-request';
+  var AUTOMATION_RESULT_EVENT = 'feishu-helper:automation-result';
+  var CONTENT_ROOT_SELECTOR = '[data-content-editable-root="true"]';
+  var EDITABLE_SELECTOR = [
+    CONTENT_ROOT_SELECTOR,
+    '.editor-kit-container[contenteditable="true"]',
+    '[contenteditable="true"]',
+    '[contenteditable="plaintext-only"]',
+    '[role="textbox"]',
+  ].join(', ');
+  var MAX_BLOCK_DEPTH = 12;
+  var DEFAULT_HEADING_STYLE = 'margin:1.2em 0 0.6em;line-height:1.35;';
+  var DEFAULT_PARAGRAPH_STYLE = 'margin:0.75em 0;';
+  var DEBUG_EDITOR_KEY_PATTERN = /paste|insert|block|clip|copy|formula|math|selection|range|command|transform|convert|doc|node|editor|service|inject|module|model|data|feature|struct|scope|render|life/i;
+  var SPECIAL_BLOCK_LABELS = {
+    diagram: '流程图',
+    whiteboard: '白板',
+    synced_reference: '引用块',
+  };
   console.info('[Feishu Helper v' + SCRIPT_VERSION + '] loaded on', location.href);
+
+  function getContentRootElement() {
+    return document.querySelector(CONTENT_ROOT_SELECTOR);
+  }
+
+  function getReactFiberNode(el) {
+    if (!el) return null;
+    var fiberKey = Object.getOwnPropertyNames(el).find(function (k) {
+      return k.startsWith('__reactFiber$') || k.startsWith('__reactInternalInstance$');
+    });
+    return fiberKey ? el[fiberKey] : null;
+  }
+
+  function findEditorApiValue(extractor) {
+    var fiber = getReactFiberNode(getContentRootElement());
+    var depth = 0;
+    while (fiber && depth < 15) {
+      var props = fiber.memoizedProps || {};
+      var value = extractor(props);
+      if (value) return value;
+      fiber = fiber.return;
+      depth++;
+    }
+    return null;
+  }
 
   function getDocToken() {
     var match = location.pathname.match(/\/(docx|wiki|doc|sheet|slides|base)\/([A-Za-z0-9]+)/);
@@ -23,49 +68,196 @@
   }
 
   function getStructService() {
-    var contentEl = document.querySelector('[data-content-editable-root="true"]');
-    if (!contentEl) return null;
-    var fiberKey = Object.keys(contentEl).find(function (k) {
-      return k.startsWith('__reactFiber$') || k.startsWith('__reactInternalInstance$');
+    return findEditorApiValue(function (props) {
+      return props.editorAPI && props.editorAPI.structService;
     });
-    if (!fiberKey) return null;
-    var fiber = contentEl[fiberKey];
-    var depth = 0;
-    while (fiber && depth < 15) {
-      var props = fiber.memoizedProps || {};
-      if (props.editorAPI && props.editorAPI.structService) {
-        return props.editorAPI.structService;
-      }
-      fiber = fiber.return;
-      depth++;
-    }
-    return null;
   }
 
   function getEditorAPI() {
-    var contentEl = document.querySelector('[data-content-editable-root="true"]');
-    if (!contentEl) return null;
-    var fiberKey = Object.keys(contentEl).find(function (k) {
-      return k.startsWith('__reactFiber$') || k.startsWith('__reactInternalInstance$');
+    return findEditorApiValue(function (props) {
+      return props.editorAPI;
     });
-    if (!fiberKey) return null;
-    var fiber = contentEl[fiberKey];
-    var depth = 0;
-    while (fiber && depth < 15) {
-      var props = fiber.memoizedProps || {};
-      if (props.editorAPI) {
-        return props.editorAPI;
-      }
-      fiber = fiber.return;
-      depth++;
-    }
-    return null;
   }
 
   function summarizeDebugText(value, limit) {
     value = String(value == null ? '' : value);
     limit = limit || 240;
     return value.length > limit ? value.slice(0, limit) + '…' : value;
+  }
+
+  function getDocumentTitle() {
+    var title = document.querySelector('title');
+    return title ? title.textContent.replace(/ - 飞书云文档$/, '').replace(/ - Lark$/, '') : '副本';
+  }
+
+  function getBlockChildren(block) {
+    return block && Array.isArray(block.children) ? block.children : [];
+  }
+
+  function buildBlockRecordMap(block) {
+    var blockMap = {};
+    getBlockChildren(block).forEach(function (child) {
+      if (child.record && child.record.id) blockMap[child.record.id] = child;
+    });
+    return blockMap;
+  }
+
+  function collectRenderedChildBlocks(block, depth, renderChild) {
+    var childHtmlArr = [];
+    var childMdArr = [];
+
+    getBlockChildren(block).forEach(function (child) {
+      var childResult = renderChild(child, depth + 1);
+      if (!childResult) return;
+      if (childResult.html) childHtmlArr.push(childResult.html);
+      if (childResult.md) childMdArr.push(childResult.md);
+    });
+
+    return {
+      html: childHtmlArr,
+      md: childMdArr,
+    };
+  }
+
+  function collectTableCellParts(cellBlock, extractor) {
+    var parts = [];
+    getBlockChildren(cellBlock).forEach(function (child) {
+      if (!(child.record && child.record.snapshot)) return;
+      var value = extractor(child.record.snapshot);
+      if (value) parts.push(value);
+    });
+    return parts;
+  }
+
+  function withExtractedDocument(loadingMessage, failureMessage, onSuccess) {
+    showToast(loadingMessage, 0);
+    setTimeout(function () {
+      var content = extractFullDoc();
+      if (!content) {
+        showToast(failureMessage);
+        return;
+      }
+      onSuccess(content, getDocumentTitle());
+    }, 50);
+  }
+
+  function getHeadingTagName(type) {
+    var match = /^heading([1-9])$/.exec(type || '');
+    if (!match) return '';
+    return 'h' + Math.min(parseInt(match[1], 10), 6);
+  }
+
+  function getHeadingMarkdownPrefix(type) {
+    var match = /^heading([1-9])$/.exec(type || '');
+    if (!match) return '';
+    return new Array(Math.min(parseInt(match[1], 10), 6) + 1).join('#');
+  }
+
+  function indentMultilineText(text, prefix) {
+    return String(text || '').split('\n').map(function (line) {
+      return prefix + line;
+    }).join('\n');
+  }
+
+  function renderMarkdownListItem(prefix, text, childMd) {
+    var line = prefix + text;
+    return childMd ? line + '\n' + indentMultilineText(childMd, '  ') : line;
+  }
+
+  function renderMarkdownBlockquote(content) {
+    content = String(content || '').trim();
+    if (!content) return '';
+    return content.split('\n').map(function (line) {
+      return '> ' + line;
+    }).join('\n');
+  }
+
+  function getCalloutMarkdownType(snap) {
+    var emojiId = String(snap && snap.emoji_id || '').trim().toLowerCase();
+
+    if (emojiId === 'warning') return 'WARNING';
+    if (emojiId === 'light_bulb' || emojiId === 'rocket' || emojiId === 'key') return 'TIP';
+    if (emojiId === 'boom' || emojiId === 'thumbs_down') return 'CAUTION';
+    if (emojiId === 'check_box_with_check' || emojiId === 'trophy' || emojiId === 'thumbs_up') return 'SUCCESS';
+    if (emojiId === 'exclamation' || emojiId === 'question' || emojiId === 'gear' || emojiId === 'lock') return 'IMPORTANT';
+
+    return 'NOTE';
+  }
+
+  function renderHtmlPlaceholder(label) {
+    return '<p>[' + label + ']</p>';
+  }
+
+  function renderMarkdownPlaceholder(label) {
+    return '[' + label + ']';
+  }
+
+  function getImageAssetInfo(image) {
+    image = image || {};
+    return {
+      src: image.token ? location.origin + '/space/api/box/stream/download/preview/' + image.token + '/?preview_type=16' : '',
+      alt: image.name || '',
+    };
+  }
+
+  function buildTableMatrix(snap, block, extractor, joinParts) {
+    var rows = snap.rows_id || [];
+    var cols = snap.columns_id || [];
+    var cellSet = snap.cell_set || {};
+
+    if (!rows.length || !cols.length) return null;
+
+    var blockMap = buildBlockRecordMap(block);
+    var tableRows = rows.map(function (rowId) {
+      return cols.map(function (colId) {
+        var cellInfo = cellSet[rowId + colId];
+        if (!(cellInfo && cellInfo.block_id)) return '';
+
+        var cellBlock = blockMap[cellInfo.block_id];
+        if (!cellBlock) return '';
+
+        return joinParts(collectTableCellParts(cellBlock, extractor));
+      });
+    });
+
+    return {
+      cols: cols,
+      rows: tableRows,
+    };
+  }
+
+  function runPasteAttempt(payload, options) {
+    var insertResult = options.allowInsert ? tryInsertPayloadIntoEditor(payload) : null;
+    var autoInserted = !!insertResult;
+    var autoPasted = autoInserted ? false : (!!options.allowDispatch && dispatchPastePayload(payload));
+    return {
+      autoInserted: autoInserted,
+      autoPasted: autoPasted,
+      pathLabel: describePasteMode(insertResult ? insertResult.mode : (autoPasted ? 'pasteEvent' : 'clipboardOnly')),
+    };
+  }
+
+  function showPasteResultToast(status, needsParser, clipboardWritten) {
+    if (clipboardWritten) {
+      if (needsParser) {
+        showToast('📋 v' + SCRIPT_VERSION + ' 已写入剪贴板；检测到公式，请直接按 Cmd+V 走飞书原生粘贴解析', 4300);
+      } else if (status.autoInserted) {
+        showToast('✅ v' + SCRIPT_VERSION + ' 已通过“' + status.pathLabel + '”插入内容，并已写入剪贴板', 3600);
+      } else if (status.autoPasted) {
+        showToast('✅ v' + SCRIPT_VERSION + ' 已通过“' + status.pathLabel + '”尝试粘贴，并已写入剪贴板；若没生效再按 Cmd+V', 4200);
+      } else {
+        showToast('📋 v' + SCRIPT_VERSION + ' 当前走的是“' + status.pathLabel + '”，请按 Cmd+V 粘贴', 3800);
+      }
+      return;
+    }
+
+    if (status.autoInserted) {
+      showToast('✅ v' + SCRIPT_VERSION + ' 已通过“' + status.pathLabel + '”插入内容', 3200);
+    } else if (status.autoPasted) {
+      showToast('✅ v' + SCRIPT_VERSION + ' 已通过“' + status.pathLabel + '”尝试粘贴' + (needsParser ? '；检测到公式，若仍未渲染请再按 Cmd+V' : '；若没生效再按 Cmd+V'), 4200);
+    } else {
+      showToast('⚠️ v' + SCRIPT_VERSION + ' 未找到可直接粘贴的编辑器，只能走“' + status.pathLabel + '”但写剪贴板也失败了' + (needsParser ? '；当前内容含公式' : ''), 4300);
+    }
   }
 
   function safeGetOwnKeys(obj) {
@@ -605,6 +797,90 @@
     }).join('');
   }
 
+  var syntheticClipboardBlockCounter = 0;
+
+  function nextSyntheticClipboardId(prefix) {
+    syntheticClipboardBlockCounter += 1;
+    return String(prefix || 'feishu_helper') + '_' + syntheticClipboardBlockCounter.toString(36);
+  }
+
+  function buildCalloutClipboardMetadata(snap) {
+    var blockId = String(snap && (snap.block_id || snap.blockId) || nextSyntheticClipboardId('callout_block'));
+    var recordId = String(snap && (snap.record_id || snap.recordId) || nextSyntheticClipboardId('callout_record'));
+    var emojiId = String(snap && snap.emoji_id || '');
+    var backgroundColor = normalizeCssColor(snap && snap.background_color || '');
+    var borderColor = normalizeCssColor(snap && snap.border_color || '');
+    var textColor = normalizeCssColor(snap && snap.text_color || '');
+    var align = normalizeTextAlign(snap && snap.align || '');
+    var text = decodeBlockText(snap || {});
+    var calloutType = getCalloutMarkdownType(snap || {});
+    var snapshot = {
+      type: 'callout',
+      emoji_id: emojiId,
+      background_color: backgroundColor,
+      border_color: borderColor,
+      text_color: textColor,
+      align: align,
+      callout_type: calloutType,
+    };
+
+    if (text) snapshot.text = text;
+
+    return {
+      blockId: blockId,
+      recordId: recordId,
+      recordData: JSON.stringify({
+        rootId: recordId,
+        blockId: blockId,
+        recordId: recordId,
+        type: 'callout',
+        emoji_id: emojiId,
+        background_color: backgroundColor,
+        border_color: borderColor,
+        text_color: textColor,
+        align: align,
+        snapshot: snapshot,
+      }),
+      metaBlockProps: JSON.stringify({
+        blockId: blockId,
+        recordId: recordId,
+        blockType: 'CALLOUT_BLOCK',
+        props: {
+          data: {
+            emojiId: emojiId,
+            backgroundColor: backgroundColor,
+            borderColor: borderColor,
+            textColor: textColor,
+            align: align,
+            calloutType: calloutType,
+            text: text,
+          },
+        },
+      }),
+    };
+  }
+
+  function shouldPreserveFeishuHtmlAttribute(el, attr) {
+    if (!el || !attr) return false;
+    var name = String(attr.name || '').toLowerCase();
+    if (!name) return false;
+
+    if (name === 'class') {
+      if (el.hasAttribute('data-block-type')) return true;
+      return /\b(docx-[\w-]+|callout-[\w-]+)\b/i.test(String(attr.value || ''));
+    }
+
+    var preservedDataAttrs = {
+      'data-block-type': true,
+      'data-block-id': true,
+      'data-record-id': true,
+      'data-emoji-id': true,
+      'data-lark-record-data': true,
+      'data-meta-block-props': true,
+    };
+    return !!preservedDataAttrs[name];
+  }
+
   function mergeStyleStrings() {
     var merged = {};
     for (var i = 0; i < arguments.length; i++) {
@@ -955,6 +1231,9 @@
           el.removeAttribute(attr.name);
           return;
         }
+        if (shouldPreserveFeishuHtmlAttribute(el, attr)) {
+          return;
+        }
         if (name.indexOf('data-') === 0 || name === 'id' || name === 'class' || name === 'contenteditable' || name === 'role') {
           el.removeAttribute(attr.name);
           return;
@@ -1238,21 +1517,17 @@
     var type = snap.type;
     var text = decodeBlockHtml(snap);
     var childHtml = childHtmlArr ? finalizeHtmlFragment(childHtmlArr.join('\n')) : '';
+    var headingTag = getHeadingTagName(type);
+
+    if (headingTag) {
+      return wrapWithStyleTag(headingTag, buildBlockStyle(DEFAULT_HEADING_STYLE, snap, ''), text);
+    }
 
     switch (type) {
-      case 'heading1': return wrapWithStyleTag('h1', buildBlockStyle('margin:1.2em 0 0.6em;line-height:1.35;', snap, ''), text);
-      case 'heading2': return wrapWithStyleTag('h2', buildBlockStyle('margin:1.2em 0 0.6em;line-height:1.35;', snap, ''), text);
-      case 'heading3': return wrapWithStyleTag('h3', buildBlockStyle('margin:1.2em 0 0.6em;line-height:1.35;', snap, ''), text);
-      case 'heading4': return wrapWithStyleTag('h4', buildBlockStyle('margin:1.2em 0 0.6em;line-height:1.35;', snap, ''), text);
-      case 'heading5': return wrapWithStyleTag('h5', buildBlockStyle('margin:1.2em 0 0.6em;line-height:1.35;', snap, ''), text);
-      case 'heading6': return wrapWithStyleTag('h6', buildBlockStyle('margin:1.2em 0 0.6em;line-height:1.35;', snap, ''), text);
-      case 'heading7': return wrapWithStyleTag('h6', buildBlockStyle('margin:1.2em 0 0.6em;line-height:1.35;', snap, ''), text);
-      case 'heading8': return wrapWithStyleTag('h6', buildBlockStyle('margin:1.2em 0 0.6em;line-height:1.35;', snap, ''), text);
-      case 'heading9': return wrapWithStyleTag('h6', buildBlockStyle('margin:1.2em 0 0.6em;line-height:1.35;', snap, ''), text);
       case 'text':
-        if (childHtml && text) return '<p style="' + escapeAttr(buildBlockStyle('margin:0.75em 0;', snap, '')) + '">' + text + '</p>' + childHtml;
+        if (childHtml && text) return '<p style="' + escapeAttr(buildBlockStyle(DEFAULT_PARAGRAPH_STYLE, snap, '')) + '">' + text + '</p>' + childHtml;
         if (childHtml) return childHtml;
-        return '<p style="' + escapeAttr(buildBlockStyle('margin:0.75em 0;', snap, '')) + '">' + text + '</p>';
+        return '<p style="' + escapeAttr(buildBlockStyle(DEFAULT_PARAGRAPH_STYLE, snap, '')) + '">' + text + '</p>';
       case 'ordered':
         return renderListItemHtml('ordered', text, childHtml, snap);
       case 'bullet':
@@ -1264,9 +1539,7 @@
         var lang = (snap.language || snap.lang || '').replace(/^plain_text$/, '');
         return '<pre style="' + escapeAttr(buildBlockStyle('margin:0.75em 0;background:#f6f8fa;padding:12px 16px;border-radius:8px;overflow:auto;white-space:pre-wrap;', snap, '')) + '"><code' + (lang ? ' class="language-' + escapeAttr(lang) + '"' : '') + ' style="font-family:ui-monospace,SFMono-Regular,Menlo,monospace;">' + escapeHtml(decodeBlockText(snap)) + '</code></pre>';
       case 'image':
-        var imgToken = snap.image && snap.image.token;
-        var imgSrc = imgToken ? location.origin + '/space/api/box/stream/download/preview/' + imgToken + '/?preview_type=16' : '';
-        var imgAlt = (snap.image && snap.image.name) || '';
+        var imageAsset = getImageAssetInfo(snap.image);
         var caption = '';
         var imageAlign = normalizeTextAlign(snap.align) || 'center';
         var imageMargin = imageAlign === 'left' ? 'margin:0 auto 0 0;' : imageAlign === 'right' ? 'margin:0 0 0 auto;' : 'margin:0 auto;';
@@ -1274,16 +1547,17 @@
           var capText = decodeBlockHtml({ text: snap.image.caption.text });
           if (capText) caption = '<figcaption style="margin-top:8px;color:#57606a;font-size:13px;">' + capText + '</figcaption>';
         }
-        return '<figure style="' + escapeAttr(buildBlockStyle('margin:1em 0;text-align:' + imageAlign + ';', snap, '')) + '"><img src="' + escapeAttr(imgSrc) + '" alt="' + escapeAttr(imgAlt) + '" style="max-width:100%;height:auto;display:block;' + imageMargin + '" />' + caption + '</figure>';
+        return '<figure style="' + escapeAttr(buildBlockStyle('margin:1em 0;text-align:' + imageAlign + ';', snap, '')) + '"><img src="' + escapeAttr(imageAsset.src) + '" alt="' + escapeAttr(imageAsset.alt) + '" style="max-width:100%;height:auto;display:block;' + imageMargin + '" />' + caption + '</figure>';
       case 'callout':
         var emoji = getEmoji(snap.emoji_id);
         var bgColor = snap.background_color || '';
         var borderColor = snap.border_color || '';
+        var calloutMeta = buildCalloutClipboardMetadata(snap);
         var containerStyle = buildBlockStyle('padding:12px 16px;border-radius:8px;margin:0.75em 0;', snap, styleObjectToString({
           border: normalizeCssColor(borderColor) ? '1px solid ' + normalizeCssColor(borderColor) : '',
           background: normalizeCssColor(bgColor),
         }));
-        return '<div class="callout-container"' + (containerStyle ? ' style="' + escapeAttr(containerStyle) + '"' : '') + ' data-emoji-id="' + escapeAttr(snap.emoji_id || '') + '"><div class="callout-block">' + (emoji ? '<span>' + emoji + '</span> ' : '') + childHtml + '</div></div>';
+        return '<div class="block docx-callout-block callout-container" data-block-type="callout" data-block-id="' + escapeAttr(calloutMeta.blockId) + '" data-record-id="' + escapeAttr(calloutMeta.recordId) + '" data-emoji-id="' + escapeAttr(snap.emoji_id || '') + '" data-lark-record-data="' + escapeAttr(calloutMeta.recordData) + '" data-meta-block-props="' + escapeAttr(calloutMeta.metaBlockProps) + '"' + (containerStyle ? ' style="' + escapeAttr(containerStyle) + '"' : '') + '><div class="callout-block">' + (emoji ? '<span>' + emoji + '</span> ' : '') + childHtml + '</div></div>';
       case 'quote_container':
         return '<blockquote style="margin:0.75em 0;border-left:4px solid #d0d7de;padding-left:1em;color:#57606a;">' + childHtml + '</blockquote>';
       case 'grid':
@@ -1296,59 +1570,28 @@
       case 'table_cell':
         return childHtml || '<p></p>';
       case 'diagram':
-        return '<p>[流程图]</p>';
       case 'whiteboard':
-        return '<p>[白板]</p>';
       case 'synced_reference':
-        return '<p>[引用块]</p>';
+        return renderHtmlPlaceholder(SPECIAL_BLOCK_LABELS[type]);
       default:
-        return text ? '<p style="margin:0.75em 0;">' + text + '</p>' : '';
+        return text ? '<p style="' + DEFAULT_PARAGRAPH_STYLE + '">' + text + '</p>' : '';
     }
   }
 
   function tableToHtml(snap, block) {
-    var rows = snap.rows_id || [];
-    var cols = snap.columns_id || [];
-    var cellSet = snap.cell_set || {};
-
-    if (!rows.length || !cols.length) return '';
-
-    var blockMap = {};
-    if (block.children && Array.isArray(block.children)) {
-      block.children.forEach(function(c) {
-        if (c.record && c.record.id) blockMap[c.record.id] = c;
-      });
-    }
+    var matrix = buildTableMatrix(snap, block, decodeBlockHtml, function (parts) {
+      return finalizeHtmlFragment(parts.join('<br>'));
+    });
+    if (!matrix) return '';
 
     var html = '<table border="1" cellpadding="6" cellspacing="0" style="width:100%;border-collapse:collapse;font-size:14px;margin:0.75em 0;">';
-
-    for (var ri = 0; ri < rows.length; ri++) {
+    matrix.rows.forEach(function (row) {
       html += '<tr>';
-      for (var cj = 0; cj < cols.length; cj++) {
-        var cellKey = rows[ri] + cols[cj];
-        var cellInfo = cellSet[cellKey];
-        var cellContent = '';
-
-        if (cellInfo && cellInfo.block_id) {
-          var cellBlock = blockMap[cellInfo.block_id];
-          if (cellBlock) {
-            var cellChildHtml = [];
-            if (cellBlock.children && Array.isArray(cellBlock.children)) {
-              cellBlock.children.forEach(function(gc) {
-                if (gc.record && gc.record.snapshot) {
-                  var gcText = decodeBlockHtml(gc.record.snapshot);
-                  if (gcText) cellChildHtml.push(gcText);
-                }
-              });
-            }
-            cellContent = finalizeHtmlFragment(cellChildHtml.join('<br>'));
-          }
-        }
-
+      row.forEach(function (cellContent) {
         html += '<td style="border:1px solid #d0d7de;padding:8px 10px;vertical-align:top;">' + cellContent + '</td>';
-      }
+      });
       html += '</tr>';
-    }
+    });
 
     html += '</table>';
     return html;
@@ -1358,40 +1601,36 @@
     var type = snap.type;
     var text = decodeBlockText(snap);
     var childMd = childMdArr ? childMdArr.join('\n') : '';
+    var headingPrefix = getHeadingMarkdownPrefix(type);
+
+    if (headingPrefix) {
+      return headingPrefix + ' ' + text;
+    }
 
     switch (type) {
-      case 'heading1': return '# ' + text;
-      case 'heading2': return '## ' + text;
-      case 'heading3': return '### ' + text;
-      case 'heading4': return '#### ' + text;
-      case 'heading5': return '##### ' + text;
-      case 'heading6': return '###### ' + text;
-      case 'heading7': return '###### ' + text;
-      case 'heading8': return '###### ' + text;
-      case 'heading9': return '###### ' + text;
       case 'text':
         if (childMd) return text + '\n' + childMd;
         return text;
       case 'ordered':
-        if (childMd) return '1. ' + text + '\n' + childMd.split('\n').map(function(l) { return '  ' + l; }).join('\n');
-        return '1. ' + text;
+        return renderMarkdownListItem('1. ', text, childMd);
       case 'bullet':
-        if (childMd) return '- ' + text + '\n' + childMd.split('\n').map(function(l) { return '  ' + l; }).join('\n');
-        return '- ' + text;
+        return renderMarkdownListItem('- ', text, childMd);
       case 'todo': return (snap.checked ? '[x]' : '[ ]') + ' ' + text;
       case 'divider': return '---';
       case 'code':
         var lang = (snap.language || snap.lang || '').replace(/^plain_text$/, '');
         return '```' + lang + '\n' + text + '\n```';
       case 'image':
-        var imgTokenMd = snap.image && snap.image.token;
-        var imgSrcMd = imgTokenMd ? location.origin + '/space/api/box/stream/download/preview/' + imgTokenMd + '/?preview_type=16' : '';
-        return '![' + (snap.image && snap.image.name || '') + '](' + imgSrcMd + ')';
+        var imageAsset = getImageAssetInfo(snap.image);
+        return '![' + imageAsset.alt + '](' + imageAsset.src + ')';
       case 'callout':
-        var emoji = getEmoji(snap.emoji_id);
-        return (emoji ? emoji + ' ' : '') + childMd;
+        var calloutType = getCalloutMarkdownType(snap);
+        var calloutLines = ['[!' + calloutType + ']'];
+        if (text) calloutLines.push(text);
+        if (childMd) calloutLines.push(childMd);
+        return renderMarkdownBlockquote(calloutLines.join('\n'));
       case 'quote_container':
-        return childMd.split('\n').map(function(l) { return '> ' + l; }).join('\n');
+        return renderMarkdownBlockquote(childMd);
       case 'grid':
         return childMd;
       case 'grid_column':
@@ -1401,62 +1640,23 @@
       case 'table_cell':
         return childMd;
       case 'diagram':
-        return '[流程图]';
       case 'whiteboard':
-        return '[白板]';
       case 'synced_reference':
-        return '[引用块]';
+        return renderMarkdownPlaceholder(SPECIAL_BLOCK_LABELS[type]);
       default:
         return text;
     }
   }
 
   function tableToMarkdown(snap, block) {
-    var rows = snap.rows_id || [];
-    var cols = snap.columns_id || [];
-    var cellSet = snap.cell_set || {};
+    var matrix = buildTableMatrix(snap, block, decodeBlockText, function (parts) {
+      return parts.join(' ').replace(/\|/g, '\\|').replace(/\n/g, ' ');
+    });
+    if (!matrix) return '';
 
-    if (!rows.length || !cols.length) return '';
-
-    var blockMap = {};
-    if (block.children && Array.isArray(block.children)) {
-      block.children.forEach(function(c) {
-        if (c.record && c.record.id) blockMap[c.record.id] = c;
-      });
-    }
-
-    var tableData = [];
-    for (var ri = 0; ri < rows.length; ri++) {
-      var row = [];
-      for (var ci = 0; ci < cols.length; ci++) {
-        var cellKey = rows[ri] + cols[ci];
-        var cellInfo = cellSet[cellKey];
-        var cellContent = '';
-
-        if (cellInfo && cellInfo.block_id) {
-          var cellBlock = blockMap[cellInfo.block_id];
-          if (cellBlock) {
-            var cellTexts = [];
-            if (cellBlock.children && Array.isArray(cellBlock.children)) {
-              cellBlock.children.forEach(function(gc) {
-                if (gc.record && gc.record.snapshot) {
-                  var gcText = decodeBlockText(gc.record.snapshot);
-                  if (gcText) cellTexts.push(gcText);
-                }
-              });
-            }
-            cellContent = cellTexts.join(' ');
-          }
-        }
-
-        row.push(cellContent.replace(/\|/g, '\\|').replace(/\n/g, ' '));
-      }
-      tableData.push(row);
-    }
-
-    var md = '| ' + cols.map(function() { return ''; }).join(' | ') + ' |\n';
-    md += '| ' + cols.map(function() { return '---'; }).join(' | ') + ' |\n';
-    tableData.forEach(function(row) {
+    var md = '| ' + matrix.cols.map(function() { return ''; }).join(' | ') + ' |\n';
+    md += '| ' + matrix.cols.map(function() { return '---'; }).join(' | ') + ' |\n';
+    matrix.rows.forEach(function (row) {
       md += '| ' + row.join(' | ') + ' |\n';
     });
 
@@ -1480,9 +1680,29 @@
       .replace(/\n+$/, '');
   }
 
+  function extractVisibleDomFallback() {
+    var root = getContentRootElement() || document.querySelector(EDITABLE_SELECTOR);
+    if (!root) return null;
+
+    var text = normalizePlainText(root.innerText || root.textContent || '');
+    var html = finalizeHtmlFragment(root.innerHTML || '');
+    if (!text && !html) return null;
+
+    var blockCount = text ? text.split('\n').filter(function (line) {
+      return line.trim();
+    }).length : 0;
+
+    return {
+      html: html || '<p>' + escapeHtml(text).replace(/\n/g, '<br>') + '</p>',
+      text: text,
+      blockCount: Math.max(1, blockCount),
+      equationCount: (text.match(/\$/g) || []).length,
+    };
+  }
+
   function extractFullDoc() {
     var ss = getStructService();
-    if (!ss || !ss.rootBlock) return null;
+    if (!ss || !ss.rootBlock) return extractVisibleDomFallback();
 
     var htmlParts = [];
     var mdParts = [];
@@ -1490,73 +1710,45 @@
     var equationCount = 0;
 
     function processBlock(block, depth) {
-      if (!block || depth > 12) return;
+      if (!block || depth > MAX_BLOCK_DEPTH) return;
       if (block.record && block.record.snapshot) {
         var snap = block.record.snapshot;
         var type = snap.type;
 
         if (type === 'page') {
-          if (block.children && Array.isArray(block.children)) {
-            for (var i = 0; i < block.children.length; i++) {
-              processBlock(block.children[i], depth + 1);
-            }
-          }
+          getBlockChildren(block).forEach(function (child) {
+            processBlock(child, depth + 1);
+          });
           return;
         }
 
-        var childHtmlArr = [];
-        var childMdArr = [];
-
-        if (block.children && Array.isArray(block.children) && block.children.length > 0) {
-          for (var ci = 0; ci < block.children.length; ci++) {
-            var childResult = processBlockInner(block.children[ci], depth + 1);
-            if (childResult) {
-              if (childResult.html) childHtmlArr.push(childResult.html);
-              if (childResult.md) childMdArr.push(childResult.md);
-            }
-          }
-        }
+        var childContent = collectRenderedChildBlocks(block, depth, processBlockInner);
 
         var decoded = decodeBlockText(snap);
         if (decoded.includes('$')) equationCount++;
 
-        var html = blockToHtml(snap, block, childHtmlArr);
-        var md = blockToMarkdown(snap, block, childMdArr);
+        var html = blockToHtml(snap, block, childContent.html);
+        var md = blockToMarkdown(snap, block, childContent.md);
 
         if (html) htmlParts.push(html);
         if (md) mdParts.push(md);
         blockCount++;
         return;
       }
-      if (block.children && Array.isArray(block.children)) {
-        for (var i = 0; i < block.children.length; i++) {
-          processBlock(block.children[i], depth + 1);
-        }
-      }
+      getBlockChildren(block).forEach(function (child) {
+        processBlock(child, depth + 1);
+      });
     }
 
     function processBlockInner(block, depth) {
-      if (!block || depth > 12) return null;
+      if (!block || depth > MAX_BLOCK_DEPTH) return null;
       if (!block.record || !block.record.snapshot) return null;
 
       var snap = block.record.snapshot;
-      var type = snap.type;
+      var childContent = collectRenderedChildBlocks(block, depth, processBlockInner);
 
-      var childHtmlArr = [];
-      var childMdArr = [];
-
-      if (block.children && Array.isArray(block.children) && block.children.length > 0) {
-        for (var ci = 0; ci < block.children.length; ci++) {
-          var childResult = processBlockInner(block.children[ci], depth + 1);
-          if (childResult) {
-            if (childResult.html) childHtmlArr.push(childResult.html);
-            if (childResult.md) childMdArr.push(childResult.md);
-          }
-        }
-      }
-
-      var html = blockToHtml(snap, block, childHtmlArr);
-      var md = blockToMarkdown(snap, block, childMdArr);
+      var html = blockToHtml(snap, block, childContent.html);
+      var md = blockToMarkdown(snap, block, childContent.md);
 
       return { html: html, md: md };
     }
@@ -1744,57 +1936,133 @@
   }
 
   function duplicateDocument() {
+    duplicateDocumentForAutomation().catch(function () {});
+  }
+
+  function duplicateDocumentForAutomation() {
     var token = getDocToken();
     if (!token) {
       showToast('⚠️ 无法识别当前文档');
-      return;
+      return Promise.reject(new Error('无法识别当前文档'));
     }
 
     showToast('⏳ 提取文档中...', 0);
+    return new Promise(function (resolve, reject) {
+      setTimeout(function () {
+        var content = extractFullDoc();
+        if (!content) {
+          showToast('⚠️ 提取失败，请确保文档已加载');
+          reject(new Error('提取失败，请确保文档已加载'));
+          return;
+        }
 
-    setTimeout(function () {
-      var content = extractFullDoc();
-      if (!content) {
-        showToast('⚠️ 提取失败，请确保文档已加载');
-        return;
-      }
-
-      var title = document.querySelector('title');
-      var docTitle = title ? title.textContent.replace(/ - 飞书云文档$/, '').replace(/ - Lark$/, '') : '副本';
-
-      buildClipboardPayload(content).then(function (payload) {
-        return setPendingPaste({
-          html: content.html,
-          text: content.text,
-          clipboardHtml: payload.html,
-          title: docTitle,
-        }).then(function () {
-          var imgCount = (content.text.match(/!\[/g) || []).length;
-          var inlinedImgCount = (payload.html.match(/data:image/g) || []).length;
-          showToast('✅ 已提取 ' + content.blockCount + ' 块 · ' + content.equationCount + ' 公式 · ' + imgCount + ' 图片 · 已缓存 ' + inlinedImgCount + ' 张', 3200);
+        var docTitle = getDocumentTitle();
+        buildClipboardPayload(content).then(function (payload) {
+          return setPendingPaste({
+            html: content.html,
+            text: content.text,
+            clipboardHtml: payload.html,
+            title: docTitle,
+          }).then(function () {
+            var imgCount = (content.text.match(/!\[/g) || []).length;
+            var inlinedImgCount = (payload.html.match(/data:image/g) || []).length;
+            showToast('✅ 已提取 ' + content.blockCount + ' 块 · ' + content.equationCount + ' 公式 · ' + imgCount + ' 图片 · 已缓存 ' + inlinedImgCount + ' 张', 3200);
+            resolve({
+              title: docTitle,
+              blockCount: Number(content.blockCount || 0),
+              equationCount: Number(content.equationCount || 0),
+              imageCount: imgCount,
+              inlinedImageCount: inlinedImgCount,
+              textLen: String(content.text || '').length,
+              htmlLen: String(content.html || '').length,
+              clipboardHtmlLen: String(payload.html || '').length,
+            });
+          });
+        }).catch(function () {
+          setPendingPaste({ html: content.html, text: content.text, title: docTitle }).then(function () {
+            var imgCount = (content.text.match(/!\[/g) || []).length;
+            showToast('⚠️ 内容已提取，但图片预处理失败，粘贴时可能退回纯文本 · ' + imgCount + ' 图片', 3500);
+            resolve({
+              title: docTitle,
+              blockCount: Number(content.blockCount || 0),
+              equationCount: Number(content.equationCount || 0),
+              imageCount: imgCount,
+              inlinedImageCount: 0,
+              textLen: String(content.text || '').length,
+              htmlLen: String(content.html || '').length,
+              clipboardHtmlLen: 0,
+              payloadError: true,
+            });
+          });
         });
-      }).catch(function () {
-        setPendingPaste({ html: content.html, text: content.text, title: docTitle }).then(function () {
-          var imgCount = (content.text.match(/!\[/g) || []).length;
-          showToast('⚠️ 内容已提取，但图片预处理失败，粘贴时可能退回纯文本 · ' + imgCount + ' 图片', 3500);
+      }, 50);
+    });
+  }
+
+  function dispatchAutomationResult(detail) {
+    try {
+      window.dispatchEvent(new CustomEvent(AUTOMATION_RESULT_EVENT, {
+        detail: detail,
+      }));
+    } catch (err) {}
+  }
+
+  function summarizePendingPasteForAutomation() {
+    return getPendingPaste().then(function (pending) {
+      if (!pending) return null;
+      return {
+        title: String(pending.title || ''),
+        textLen: String(pending.text || '').length,
+        htmlLen: String(pending.html || '').length,
+        clipboardHtmlLen: String(pending.clipboardHtml || '').length,
+        ts: Number(pending.ts || 0),
+      };
+    });
+  }
+
+  function buildRealTestDuplicateDocumentSummary() {
+    return duplicateDocumentForAutomation().then(function (summary) {
+      return summarizePendingPasteForAutomation().then(function (pendingPaste) {
+        var result = {};
+        Object.keys(summary || {}).forEach(function (key) {
+          result[key] = summary[key];
         });
+        if (pendingPaste) {
+          result.pendingPaste = pendingPaste;
+        } else {
+          result.pendingError = 'Pending paste cache was not updated.';
+        }
+        return result;
       });
-    }, 50);
+    });
+  }
+
+  function onAutomationRequest(event) {
+    var detail = event && event.detail ? event.detail : {};
+    var handlers = {
+      duplicateDocument: duplicateDocumentForAutomation,
+      realTestDuplicateDocument: buildRealTestDuplicateDocumentSummary,
+    };
+    var handler = handlers[detail.action];
+    if (!handler || !detail.requestId) return;
+
+    handler().then(function (summary) {
+      dispatchAutomationResult({
+        requestId: detail.requestId,
+        status: 'success',
+        summary: summary,
+      });
+    }).catch(function (error) {
+      dispatchAutomationResult({
+        requestId: detail.requestId,
+        status: 'error',
+        error: String(error && error.stack ? error.stack : error),
+      });
+    });
   }
 
   function exportDocumentAsHtml() {
-    showToast('⏳ 导出 HTML 中...', 0);
-
-    setTimeout(function () {
-      var content = extractFullDoc();
-      if (!content) {
-        showToast('⚠️ 导出失败，请确保文档已加载');
-        return;
-      }
-
-      var title = document.querySelector('title');
-      var docTitle = title ? title.textContent.replace(/ - 飞书云文档$/, '').replace(/ - Lark$/, '') : '副本';
-
+    withExtractedDocument('⏳ 导出 HTML 中...', '⚠️ 导出失败，请确保文档已加载', function (content, docTitle) {
       convertImagesToBase64(content.html).then(function (htmlWithImages) {
         var fullHtml = buildExportHtml(docTitle, htmlWithImages);
         var safeName = docTitle.replace(/[\\/:*?"<>|]/g, '_').trim() || 'feishu-export';
@@ -1804,16 +2072,12 @@
       }).catch(function () {
         showToast('⚠️ 导出 HTML 失败', 3000);
       });
-    }, 50);
+    });
   }
 
   function isEditableElement(el) {
     if (!el || el.nodeType !== 1) return false;
-    if (el.matches('[data-content-editable-root="true"]')) return true;
-    if (el.matches('.editor-kit-container[contenteditable="true"]')) return true;
-    if (el.matches('[contenteditable="true"], [contenteditable="plaintext-only"]')) return true;
-    if (el.matches('[role="textbox"]')) return true;
-    return false;
+    return el.matches(EDITABLE_SELECTOR);
   }
 
   function closestEditableElement(node) {
@@ -1850,7 +2114,7 @@
     }
 
     document.querySelectorAll(
-      '[data-content-editable-root="true"], .editor-kit-container[contenteditable="true"], [contenteditable="true"], [contenteditable="plaintext-only"], [role="textbox"]'
+      EDITABLE_SELECTOR
     ).forEach(function (el) {
       push(el);
     });
@@ -1972,9 +2236,18 @@
     // Any LaTeX-like marker should go through Feishu's native paste parser.
     // Direct DOM insertion preserves the literal "$...$" text but does not
     // trigger the editor's formula conversion, which is most visible in lists.
-    return /(^|[^\\])\$\$?[\s\S]+?\$\$?/.test(source) ||
+    return /^\s*>\s*\[!(NOTE|WARNING|TIP|CAUTION|IMPORTANT|SUCCESS|INFO)\]/mi.test(source) ||
+      /(^|[^\\])\$\$?[\s\S]+?\$\$?/.test(source) ||
       /\\\([\s\S]+?\\\)/.test(source) ||
       /\\\[[\s\S]+?\\\]/.test(source);
+  }
+
+  function payloadHasFeishuCalloutHtml(payload) {
+    var html = payload && payload.html ? payload.html : '';
+    if (!html) return false;
+    return /data-block-type=("|')callout\1/i.test(html) &&
+      /data-lark-record-data=/i.test(html) &&
+      /data-meta-block-props=/i.test(html);
   }
 
   function extractInsertionHtml(html) {
@@ -2095,7 +2368,7 @@
   }
 
   function shouldAutoDispatchPastePayload(payload) {
-    return !payloadRequiresPasteParsing(payload);
+    return payloadHasFeishuCalloutHtml(payload) || !payloadRequiresPasteParsing(payload);
   }
 
   function describePasteMode(mode) {
@@ -2148,38 +2421,21 @@
 
       function commitPayload(payload) {
         var needsParser = payloadRequiresPasteParsing(payload);
+        var canAutoDispatch = shouldAutoDispatchPastePayload(payload);
+        var preferPasteEventOnly = payloadHasFeishuCalloutHtml(payload);
+        var needsManualPaste = needsParser && !canAutoDispatch;
 
         writeClipboardPayload(payload).then(function () {
-          if (needsParser) {
-            showToast('📋 v' + SCRIPT_VERSION + ' 已写入剪贴板；检测到公式，请直接按 Cmd+V 走飞书原生粘贴解析', 4300);
-            return;
-          }
-
-          var insertResult = tryInsertPayloadIntoEditor(payload);
-          var autoInserted = !!insertResult;
-          var autoPasted = autoInserted ? false : (shouldAutoDispatchPastePayload(payload) && dispatchPastePayload(payload));
-          var pathLabel = describePasteMode(insertResult ? insertResult.mode : (autoPasted ? 'pasteEvent' : 'clipboardOnly'));
-
-          if (autoInserted) {
-            showToast('✅ v' + SCRIPT_VERSION + ' 已通过“' + pathLabel + '”插入内容，并已写入剪贴板', 3600);
-          } else if (autoPasted) {
-            showToast('✅ v' + SCRIPT_VERSION + ' 已通过“' + pathLabel + '”尝试粘贴，并已写入剪贴板' + (needsParser ? '；检测到公式，若仍未渲染请再按 Cmd+V' : '；若没生效再按 Cmd+V'), 4200);
-          } else {
-            showToast('📋 v' + SCRIPT_VERSION + ' 当前走的是“' + pathLabel + '”' + (needsParser ? '；检测到公式，请按 Cmd+V 触发飞书粘贴解析' : '，请按 Cmd+V 粘贴'), 3800);
-          }
+          var status = needsManualPaste ? { autoInserted: false, autoPasted: false, pathLabel: describePasteMode('clipboardOnly') } : runPasteAttempt(payload, {
+            allowInsert: !preferPasteEventOnly,
+            allowDispatch: canAutoDispatch,
+          });
+          showPasteResultToast(status, needsManualPaste, true);
         }).catch(function () {
-          var insertResult = needsParser ? null : tryInsertPayloadIntoEditor(payload);
-          var autoInserted = !!insertResult;
-          var autoPasted = autoInserted ? false : dispatchPastePayload(payload);
-          var pathLabel = describePasteMode(insertResult ? insertResult.mode : (autoPasted ? 'pasteEvent' : 'clipboardOnly'));
-
-          if (autoInserted) {
-            showToast('✅ v' + SCRIPT_VERSION + ' 已通过“' + pathLabel + '”插入内容', 3200);
-          } else if (autoPasted) {
-            showToast('✅ v' + SCRIPT_VERSION + ' 已通过“' + pathLabel + '”尝试粘贴' + (needsParser ? '；检测到公式，若仍未渲染请再按 Cmd+V' : '；若没生效再按 Cmd+V'), 4200);
-          } else {
-            showToast('⚠️ v' + SCRIPT_VERSION + ' 未找到可直接粘贴的编辑器，只能走“' + pathLabel + '”但写剪贴板也失败了' + (needsParser ? '；当前内容含公式' : ''), 4300);
-          }
+          showPasteResultToast(runPasteAttempt(payload, {
+            allowInsert: !needsParser && !preferPasteEventOnly,
+            allowDispatch: canAutoDispatch,
+          }), needsManualPaste, false);
         });
       }
 
@@ -2524,10 +2780,19 @@
     tryInjectImageMenu();
   });
 
-  imageMenuObserver.observe(document.documentElement, {
-    childList: true,
-    subtree: true,
-  });
+  function startImageMenuObserver() {
+    if (!document.documentElement) {
+      setTimeout(startImageMenuObserver, 0);
+      return;
+    }
+
+    imageMenuObserver.observe(document.documentElement, {
+      childList: true,
+      subtree: true,
+    });
+  }
+
+  startImageMenuObserver();
 
   document.addEventListener('click', function () {
     cleanupNativeImageMenuBypass();
@@ -2575,11 +2840,19 @@
 
   window.addEventListener('keydown', onEscapeKeydown, true);
   window.addEventListener('keydown', onShortcutKeydown, true);
+  window.addEventListener(AUTOMATION_REQUEST_EVENT, onAutomationRequest, true);
 
   window.__feishuHelperVersion = SCRIPT_VERSION;
-  window.__feishuDebugExports = function () {
+  window.__tampermonkeyScriptDebugExports = function () {
     return {
+      name: SCRIPT_NAME,
       version: SCRIPT_VERSION,
+      automation: {
+        requestEvent: AUTOMATION_REQUEST_EVENT,
+        resultEvent: AUTOMATION_RESULT_EVENT,
+        defaultAction: 'duplicateDocument',
+        actions: ['duplicateDocument', 'realTestDuplicateDocument'],
+      },
       exports: {
         extractFullDoc: typeof window.__feishuExtractFullDoc,
         pasteIntoDoc: typeof window.__feishuPasteIntoDoc,
@@ -2587,6 +2860,9 @@
         captureNextCopy: typeof window.__feishuCaptureNextCopy,
       },
     };
+  };
+  window.__feishuDebugExports = function () {
+    return window.__tampermonkeyScriptDebugExports();
   };
   window.__feishuGetLastCopyCapture = function () {
     return window.__feishuLastCopyCapture || null;
@@ -2672,6 +2948,7 @@
   };
   window.__feishuExtractFullDoc = extractFullDoc;
   window.__feishuDuplicateDoc = duplicateDocument;
+  window.__feishuDuplicateDocForAutomation = duplicateDocumentForAutomation;
   window.__feishuPasteIntoDoc = pasteIntoDoc;
   window.__feishuDecodeFeishuAttribsToHtml = decodeFeishuAttribsToHtml;
   window.__feishuDecodeBlockHtml = decodeBlockHtml;
@@ -2696,7 +2973,6 @@
       return null;
     }
 
-    var keyPattern = /paste|insert|block|clip|copy|formula|math|selection|range|command|transform|convert|doc|node|editor|service|inject|module|model|data|feature|struct|scope|render|life/i;
     var topLevelKeys = safeGetOwnKeys(editorAPI);
     var topLevelFunctions = [];
     var interestingChildren = {};
@@ -2714,7 +2990,7 @@
         topLevelFunctions.push(key);
       }
 
-      if (!keyPattern.test(key) && typeof value !== 'function') return;
+      if (!DEBUG_EDITOR_KEY_PATTERN.test(key) && typeof value !== 'function') return;
 
       if (!value || (typeof value !== 'object' && typeof value !== 'function')) {
         interestingChildren[key] = {
@@ -2751,7 +3027,7 @@
         keys: childKeys,
         functionKeys: childFunctions,
         sampleValues: childValues,
-        matchedPaths: collectInterestingPaths(value, 'editorAPI.' + key, keyPattern, 2, 40),
+        matchedPaths: collectInterestingPaths(value, 'editorAPI.' + key, DEBUG_EDITOR_KEY_PATTERN, 2, 40),
       };
     });
 
@@ -2759,7 +3035,7 @@
       topLevelKeys: topLevelKeys,
       topLevelFunctions: topLevelFunctions,
       interestingChildren: interestingChildren,
-      matchedPaths: collectInterestingPaths(editorAPI, 'editorAPI', keyPattern, 2, 120),
+      matchedPaths: collectInterestingPaths(editorAPI, 'editorAPI', DEBUG_EDITOR_KEY_PATTERN, 2, 120),
     };
 
     console.log('[Feishu Helper] editorAPI summary');

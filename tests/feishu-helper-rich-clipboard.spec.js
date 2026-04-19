@@ -219,6 +219,66 @@ test.describe('Feishu Helper - rich clipboard pipeline', () => {
     expect(result.html).toContain('data:image/png;base64,cG5n');
   });
 
+  test('extractFullDoc should read a non-enumerable React fiber so formulas are not lost to DOM fallback', async ({ page }) => {
+    await page.setContent('<!DOCTYPE html><html><body><div data-content-editable-root="true" contenteditable="true">fallback text</div></body></html>');
+    await page.evaluate(injectScript);
+
+    const result = await page.evaluate(() => {
+      const root = document.querySelector('[data-content-editable-root="true"]');
+      const rootBlock = {
+        record: {
+          snapshot: {
+            type: 'page',
+          },
+        },
+        children: [
+          {
+            record: {
+              snapshot: {
+                type: 'text',
+                text: {
+                  initialAttributedTexts: {
+                    attribs: { '0': '+2*0+1+2' },
+                    text: { '0': '公式x完成' },
+                  },
+                  apool: {
+                    numToAttrib: {
+                      '0': ['equation', 'x^2'],
+                    },
+                  },
+                },
+              },
+            },
+            children: [],
+          },
+        ],
+      };
+
+      Object.defineProperty(root, '__reactFiber$debug', {
+        configurable: true,
+        enumerable: false,
+        value: {
+          memoizedProps: {
+            editorAPI: {
+              structService: {
+                rootBlock,
+              },
+            },
+          },
+          return: null,
+        },
+      });
+
+      return window.__feishuExtractFullDoc();
+    });
+
+    expect(result).toBeTruthy();
+    expect(result.blockCount).toBe(1);
+    expect(result.equationCount).toBeGreaterThan(0);
+    expect(result.text).toContain('x^2');
+    expect(result.text).not.toContain('fallback text');
+  });
+
   test('direct paste dispatcher should send both html and plain text to the editor', async ({ page }) => {
     await page.setContent('<!DOCTYPE html><html><body><div class="editor-kit-container" contenteditable="true"></div></body></html>');
     await page.evaluate(injectScript);

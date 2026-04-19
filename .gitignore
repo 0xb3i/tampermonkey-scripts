@@ -1,4 +1,5 @@
 node_modules/
+.worktrees/
 test-results/
 playwright-report/
 package-lock.json
