@@ -2997,58 +2997,11 @@
 
       document.documentElement.setAttribute('data-feishu-debug', 'convertImages-base64keys-' + Object.keys(tokenToBase64).length);
 
-      // Remove image blocks from recordMap — their internal tokens are
-      // invalid cross-document and base64 cannot be used as a token.
-      // Images will render from the HTML body (which has base64 data URLs).
-      var removedImageCount = 0;
-      if (docxRecordObj && docxRecordObj.recordMap) {
-        // First pass: collect image IDs
-        var imageIds = new Set();
-        Object.keys(docxRecordObj.recordMap).forEach(function (rid) {
-          var rec = docxRecordObj.recordMap[rid];
-          if (rec && rec.snapshot && rec.snapshot.type === 'image') {
-            imageIds.add(rid);
-          }
-        });
-        // Second pass: remove image records and clean up children arrays
-        imageIds.forEach(function (rid) {
-          delete docxRecordObj.recordMap[rid];
-          removedImageCount++;
-        });
-        Object.keys(docxRecordObj.recordMap).forEach(function (rid) {
-          var snap = docxRecordObj.recordMap[rid].snapshot;
-          if (snap && Array.isArray(snap.children)) {
-            var origLen = snap.children.length;
-            snap.children = snap.children.filter(function (childId) {
-              return !imageIds.has(childId);
-            });
-          }
-        });
-        // Also remove image IDs from recordIds/blockIds/selection
-        if (Array.isArray(docxRecordObj.recordIds)) {
-          docxRecordObj.recordIds = docxRecordObj.recordIds.filter(function (rid) {
-            return !imageIds.has(rid);
-          });
-        }
-        if (Array.isArray(docxRecordObj.blockIds)) {
-          // Re-number blockIds to match filtered recordIds
-          docxRecordObj.blockIds = docxRecordObj.recordIds.map(function (_, i) {
-            return i + 2;
-          });
-        }
-        if (Array.isArray(docxRecordObj.selection)) {
-          docxRecordObj.selection = docxRecordObj.recordIds.map(function (rid, i) {
-            return { id: i + 2, type: 'block', recordId: rid };
-          });
-        }
-        // Clean payloadMap too
-        if (docxRecordObj.payloadMap) {
-          imageIds.forEach(function (rid) {
-            delete docxRecordObj.payloadMap[rid];
-          });
-        }
-      }
-      document.documentElement.setAttribute('data-feishu-debug', 'removed-images-' + removedImageCount);
+      // Keep image blocks in recordMap with their original tokens.
+      // Feishu's native copy uses the same token format and images work
+      // cross-document. Previous failures were likely due to incorrect
+      // recordMap structure (wrong blockIds/recordIds), not the tokens.
+      document.documentElement.setAttribute('data-feishu-debug', 'recordMap-kept-images-count-' + Object.keys(docxRecordObj.recordMap).length);
 
       return {
         text: text,
@@ -4192,6 +4145,27 @@
       cleanup();
       console.log('[Feishu Helper] copy capture');
       console.log(capture);
+      // Write to DOM attribute so DevTools (different isolated world)
+      // can read the capture result without dispatching a custom event.
+      try {
+        var summary = {
+          finalizedAt: capture.finalizedAt,
+          reason: capture.reason,
+          types: Object.keys(capture.rawData || {}),
+          setDataTypes: capture.setDataCalls.map(function (c) { return c.type; }),
+        };
+        var docxData = capture.rawData && capture.rawData['docx/record'];
+        if (docxData && docxData.text) {
+          summary.docxRecordLength = docxData.text.length;
+          summary.docxRecordPreview = docxData.text.slice(0, 2000);
+        }
+        var htmlData = capture.rawData && capture.rawData['text/html'];
+        if (htmlData && htmlData.text) {
+          summary.htmlLength = htmlData.text.length;
+          summary.htmlPreview = htmlData.text.slice(0, 2000);
+        }
+        document.documentElement.setAttribute('data-feishu-copy-capture', JSON.stringify(summary));
+      } catch (e) {}
       return capture;
     }
 
@@ -4272,6 +4246,8 @@
 
     window.__feishuCopyCaptureCleanup = cleanup;
     window.__feishuLastCopyCapture = null;
+    // Signal to DevTools that capture is armed (cross-isolated-world visibility)
+    document.documentElement.setAttribute('data-feishu-copy-capture', JSON.stringify({ armed: true, armedAt: capture.armedAt, timeoutMs: 30000 }));
     console.log('[Feishu Helper] copy capture armed');
     return {
       armed: true,
