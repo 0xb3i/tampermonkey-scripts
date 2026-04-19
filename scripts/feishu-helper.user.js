@@ -23,7 +23,7 @@
   }
 
   var SCRIPT_NAME = '飞书文档助手';
-  var SCRIPT_VERSION = '4.2.16';
+  var SCRIPT_VERSION = '4.2.17';
   var AUTOMATION_REQUEST_EVENT = 'feishu-helper:automation-request';
   var AUTOMATION_RESULT_EVENT = 'feishu-helper:automation-result';
   var CONTENT_ROOT_SELECTOR = '[data-content-editable-root="true"]';
@@ -894,11 +894,20 @@
   }
 
   function normalizeCssColor(value) {
+    // Feishu internal snapshot may store colors as integer codes
+    var num = Number(value);
+    if (num > 0 && num <= 14 && FEISHU_BG_COLOR_TO_CSS[num]) return FEISHU_BG_COLOR_TO_CSS[num];
+    if (num > 0 && num <= 7 && FEISHU_TEXT_COLOR_TO_CSS[num]) return FEISHU_TEXT_COLOR_TO_CSS[num];
     value = String(value || '').trim();
     return isSafeCssColor(value) ? value : '';
   }
 
   function normalizeTextAlign(value) {
+    // Feishu internal snapshot may store align as integer: 1=left, 2=center, 3=right
+    var num = Number(value);
+    if (num === 1) return 'left';
+    if (num === 2) return 'center';
+    if (num === 3) return 'right';
     value = String(value || '').trim().toLowerCase();
     return /^(left|right|center|justify)$/.test(value) ? value : '';
   }
@@ -910,6 +919,87 @@
 
   function normalizeEmojiId(value) {
     return String(value || '').trim().toLowerCase();
+  }
+
+  // Feishu internal color codes (integers) mapped to CSS hex values.
+  // Background colors use the fontBgColorMap (1–14), text colors use fontColorMap (1–7).
+  var FEISHU_BG_COLOR_TO_CSS = {
+    1: '#fef2f2', 2: '#fff7ed', 3: '#fefce8', 4: '#f0fdf4',
+    5: '#eff6ff', 6: '#faf5ff', 7: '#f9fafb',
+    8: '#fecaca', 9: '#fed7aa', 10: '#fef08a', 11: '#bbf7d0',
+    12: '#bfdbfe', 13: '#e9d5ff', 14: '#e5e7eb',
+  };
+  var FEISHU_TEXT_COLOR_TO_CSS = {
+    1: '#ef4444', 2: '#f97316', 3: '#eab308', 4: '#22c55e',
+    5: '#3b82f6', 6: '#a855f7', 7: '#6b7280',
+  };
+  // Callout border_color uses a separate enum (1-7) with different color values than background_color.
+  var FEISHU_BORDER_COLOR_TO_CSS = {
+    1: '#fecaca', 2: '#fed7aa', 3: '#fef08a', 4: '#bbf7d0',
+    5: '#bfdbfe', 6: '#e9d5ff', 7: '#e5e7eb',
+  };
+
+  // Reverse maps: CSS hex → Feishu integer code
+  var CSS_TO_FEISHU_BG_COLOR = {};
+  Object.keys(FEISHU_BG_COLOR_TO_CSS).forEach(function (k) {
+    CSS_TO_FEISHU_BG_COLOR[FEISHU_BG_COLOR_TO_CSS[k].toLowerCase()] = Number(k);
+  });
+  var CSS_TO_FEISHU_TEXT_COLOR = {};
+  Object.keys(FEISHU_TEXT_COLOR_TO_CSS).forEach(function (k) {
+    CSS_TO_FEISHU_TEXT_COLOR[FEISHU_TEXT_COLOR_TO_CSS[k].toLowerCase()] = Number(k);
+  });
+  var CSS_TO_FEISHU_BORDER_COLOR = {};
+  Object.keys(FEISHU_BORDER_COLOR_TO_CSS).forEach(function (k) {
+    CSS_TO_FEISHU_BORDER_COLOR[FEISHU_BORDER_COLOR_TO_CSS[k].toLowerCase()] = Number(k);
+  });
+
+  function cssColorToFeishuBgCode(cssColor) {
+    if (!cssColor) return 0;
+    var hex = cssColorToHex(cssColor);
+    if (!hex) return 0;
+    return CSS_TO_FEISHU_BG_COLOR[hex.toLowerCase()] || 0;
+  }
+
+  function cssColorToFeishuBorderColorCode(cssColor) {
+    if (!cssColor) return 0;
+    var hex = cssColorToHex(cssColor);
+    if (!hex) return 0;
+    return CSS_TO_FEISHU_BORDER_COLOR[hex.toLowerCase()] || 0;
+  }
+
+  function cssColorToFeishuTextCode(cssColor) {
+    if (!cssColor) return 0;
+    var hex = cssColorToHex(cssColor);
+    if (!hex) return 0;
+    return CSS_TO_FEISHU_TEXT_COLOR[hex.toLowerCase()] || 0;
+  }
+
+  function cssColorToHex(cssColor) {
+    cssColor = String(cssColor || '').trim();
+    if (!cssColor) return '';
+    if (cssColor.charAt(0) === '#') return cssColor;
+    var rgbMatch = cssColor.match(/^rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)/i);
+    if (!rgbMatch) return cssColor;
+    var r = parseInt(rgbMatch[1], 10);
+    var g = parseInt(rgbMatch[2], 10);
+    var b = parseInt(rgbMatch[3], 10);
+    return '#' + ((1 << 24) + (r << 16) + (g << 8) + b).toString(16).slice(1);
+  }
+
+  // Feishu align codes: 1=left, 2=center, 3=right
+  function alignStringToFeishuCode(alignStr) {
+    if (alignStr === 'left') return 1;
+    if (alignStr === 'center') return 2;
+    if (alignStr === 'right') return 3;
+    return 0;
+  }
+
+  function feishuCodeToAlignString(code) {
+    code = Number(code) || 0;
+    if (code === 1) return 'left';
+    if (code === 2) return 'center';
+    if (code === 3) return 'right';
+    return '';
   }
 
   // Canonical block-level style metadata shared across rendering and clipboard
@@ -985,13 +1075,18 @@
     var align = normalizedBlockStyle.align;
     var text = selectPrimaryCalloutContent(decodeBlockText(snap || {}), options && options.text);
     var calloutType = getCalloutMarkdownType({ emoji_id: emojiId });
+    // Feishu paste parser expects integer color codes and align codes in recordData/metaBlockProps.
+    var bgColorCode = cssColorToFeishuBgCode(backgroundColor);
+    var borderColorCode = cssColorToFeishuBorderColorCode(borderColor);
+    var textColorCode = cssColorToFeishuTextCode(textColor);
+    var alignCode = alignStringToFeishuCode(align);
     var snapshot = {
       type: 'callout',
       emoji_id: emojiId,
-      background_color: backgroundColor,
-      border_color: borderColor,
-      text_color: textColor,
-      align: align,
+      background_color: bgColorCode,
+      border_color: borderColorCode,
+      text_color: textColorCode,
+      align: alignCode,
       callout_type: calloutType,
       normalizedStyle: normalizedStyleMetadata,
     };
@@ -1007,10 +1102,10 @@
         recordId: recordId,
         type: 'callout',
         emoji_id: emojiId,
-        background_color: backgroundColor,
-        border_color: borderColor,
-        text_color: textColor,
-        align: align,
+        background_color: bgColorCode,
+        border_color: borderColorCode,
+        text_color: textColorCode,
+        align: alignCode,
         normalizedStyle: normalizedStyleMetadata,
         snapshot: snapshot,
       }),
@@ -1021,12 +1116,72 @@
         props: {
           data: {
             emojiId: emojiId,
-            backgroundColor: backgroundColor,
-            borderColor: borderColor,
-            textColor: textColor,
-            align: align,
+            backgroundColor: bgColorCode,
+            borderColor: borderColorCode,
+            textColor: textColorCode,
+            align: alignCode,
             calloutType: calloutType,
             text: text,
+            normalizedStyle: normalizedStyleMetadata,
+          },
+        },
+      }),
+    };
+  }
+
+  function buildImageClipboardMetadata(snap, normalizedStyle) {
+    var blockId = String(snap && (snap.block_id || snap.blockId) || nextSyntheticClipboardId('image_block'));
+    var recordId = String(snap && (snap.record_id || snap.recordId) || nextSyntheticClipboardId('image_record'));
+    var normalizedBlockStyle = normalizedStyle || normalizeBlockStyle(snap);
+    var normalizedStyleMetadata = {
+      align: normalizedBlockStyle.align,
+      imageAlign: normalizedBlockStyle.imageAlign,
+    };
+    var imageInfo = snap && snap.image ? snap.image : {};
+    var imageToken = imageInfo.token || '';
+    var imageWidth = imageInfo.width || 0;
+    var imageHeight = imageInfo.height || 0;
+    var imageAlign = normalizedBlockStyle.imageAlign || 'center';
+    // Feishu paste parser expects integer align code (1=left, 2=center, 3=right).
+    var alignCode = alignStringToFeishuCode(imageAlign);
+    var snapshot = {
+      type: 'image',
+      align: alignCode,
+      image: {
+        token: imageToken,
+        width: imageWidth,
+        height: imageHeight,
+      },
+      normalizedStyle: normalizedStyleMetadata,
+    };
+
+    return {
+      blockId: blockId,
+      recordId: recordId,
+      recordData: JSON.stringify({
+        rootId: recordId,
+        blockId: blockId,
+        recordId: recordId,
+        type: 'image',
+        align: alignCode,
+        image: {
+          token: imageToken,
+          width: imageWidth,
+          height: imageHeight,
+        },
+        normalizedStyle: normalizedStyleMetadata,
+        snapshot: snapshot,
+      }),
+      metaBlockProps: JSON.stringify({
+        blockId: blockId,
+        recordId: recordId,
+        blockType: 'IMAGE_BLOCK',
+        props: {
+          data: {
+            align: alignCode,
+            token: imageToken,
+            width: imageWidth,
+            height: imageHeight,
             normalizedStyle: normalizedStyleMetadata,
           },
         },
@@ -1041,7 +1196,7 @@
 
     if (name === 'class') {
       if (el.hasAttribute('data-block-type')) return true;
-      return /\b(docx-[\w-]+|callout-[\w-]+)\b/i.test(String(attr.value || ''));
+      return /\b(docx-[\w-]+|callout-[\w-]+|lark-record-clipboard|zoneType-[\w-]+)\b/i.test(String(attr.value || ''));
     }
 
     var preservedDataAttrs = {
@@ -1050,7 +1205,11 @@
       'data-record-id': true,
       'data-emoji-id': true,
       'data-lark-record-data': true,
+      'data-lark-record-format': true,
       'data-meta-block-props': true,
+      'data-page-id': true,
+      'data-lark-html-role': true,
+      'data-docx-has-block-data': true,
     };
     return !!preservedDataAttrs[name];
   }
@@ -1672,9 +1831,13 @@
     return sanitizeHtmlFragment(normalizeListHtmlFragment((html || '').trim()));
   }
 
-  function buildClipboardHtml(bodyHtml) {
+  function buildClipboardHtml(bodyHtml, docxRecord) {
     var fragment = finalizeHtmlFragment(bodyHtml);
-    return '<html><head><meta charset="utf-8"></head><body><!--StartFragment--><div data-feishu-helper="true">' + fragment + '</div><!--EndFragment--></body></html>';
+    // Use "true" so Feishu uses docx/record for structured blocks (callout colors).
+    // Image blocks are removed from recordMap (cross-document tokens invalid),
+    // so Feishu should fallback to HTML body for images (base64 data URLs).
+    var rootAttr = ' data-page-id="" data-lark-html-role="root" data-docx-has-block-data="true"';
+    return '<meta charset="utf-8"><div' + rootAttr + '>' + fragment + '</div>';
   }
 
   function renderListItemHtml(kind, text, childHtml, snap, normalizedStyle) {
@@ -1720,21 +1883,18 @@
           var capText = decodeBlockHtml({ text: snap.image.caption.text });
           if (capText) caption = '<figcaption style="margin-top:8px;color:#57606a;font-size:13px;">' + capText + '</figcaption>';
         }
-        return '<figure style="' + escapeAttr(buildBlockStyle('margin:1em 0;text-align:' + imageAlign + ';', snap, '', normalizedBlockStyle, { applyAlign: false })) + '"><img src="' + escapeAttr(imageAsset.src) + '" alt="' + escapeAttr(imageAsset.alt) + '" style="max-width:100%;height:auto;display:block;' + imageMargin + '" />' + caption + '</figure>';
+        var imageMeta = buildImageClipboardMetadata(snap, normalizedBlockStyle);
+        return '<figure class="block docx-image-block" data-block-type="image" data-block-id="' + escapeAttr(imageMeta.blockId) + '" data-record-id="' + escapeAttr(imageMeta.recordId) + '" data-lark-record-data="' + escapeAttr(imageMeta.recordData) + '" data-meta-block-props="' + escapeAttr(imageMeta.metaBlockProps) + '" style="' + escapeAttr(buildBlockStyle('margin:1em 0;text-align:' + imageAlign + ';', snap, '', normalizedBlockStyle, { applyAlign: false })) + '"><img src="' + escapeAttr(imageAsset.src) + '" alt="' + escapeAttr(imageAsset.alt) + '" style="max-width:100%;height:auto;display:block;' + imageMargin + '" />' + caption + '</figure>';
       case 'callout':
         var emoji = getEmoji(normalizedBlockStyle.calloutEmojiId);
         var bgColor = normalizedBlockStyle.backgroundColor;
         var borderColor = normalizedBlockStyle.borderColor;
         var calloutTextHtml = text ? '<p style="margin:0;">' + text + '</p>' : '';
         var calloutBodyHtml = selectPrimaryCalloutContent(calloutTextHtml, childHtml);
-        var calloutMeta = buildCalloutClipboardMetadata(snap, normalizedBlockStyle, {
-          text: selectPrimaryCalloutContent(text, extractPlainTextFromHtmlFragment(childHtml)),
-        });
-        var containerStyle = buildBlockStyle('padding:12px 16px;border-radius:8px;margin:0.75em 0;', snap, styleObjectToString({
-          border: borderColor ? '1px solid ' + borderColor : '',
-          background: bgColor,
-        }), normalizedBlockStyle);
-        return '<div class="block docx-callout-block callout-container" data-block-type="callout" data-block-id="' + escapeAttr(calloutMeta.blockId) + '" data-record-id="' + escapeAttr(calloutMeta.recordId) + '" data-emoji-id="' + escapeAttr(normalizedBlockStyle.calloutEmojiId) + '" data-lark-record-data="' + escapeAttr(calloutMeta.recordData) + '" data-meta-block-props="' + escapeAttr(calloutMeta.metaBlockProps) + '"' + (containerStyle ? ' style="' + escapeAttr(containerStyle) + '"' : '') + '><div class="callout-block">' + (emoji ? '<span>' + emoji + '</span> ' : '') + calloutBodyHtml + '</div></div>';
+        var calloutRecordId = block && block.record && block.record.id ? block.record.id : nextSyntheticClipboardId('callout_record');
+        // Match Feishu's native HTML structure for callout blocks.
+        // The paste parser recognizes zoneType-calloutBlock, callout-container, callout-block.
+        return '<div class="zoneType-calloutBlock old-record-id-' + escapeAttr(calloutRecordId) + '"><div class="callout-container" data-emoji-id="' + escapeAttr(normalizedBlockStyle.calloutEmojiId) + '"><div class="callout-block" style="background-color:' + escapeAttr(bgColor || '') + ';border-color:' + escapeAttr(borderColor || '') + ';border-radius:8px;">' + calloutBodyHtml + '</div></div></div>';
       case 'quote_container':
         return '<blockquote style="' + escapeAttr(buildBlockStyle('margin:0.75em 0;border-left:4px solid #d0d7de;padding-left:1em;color:#57606a;', snap, '', normalizedBlockStyle)) + '">' + childHtml + '</blockquote>';
       case 'grid':
@@ -1928,6 +2088,162 @@
     return result;
   }
 
+  // Build a docx/record payload matching Feishu's native clipboard format.
+  // Feishu's paste parser reads the docx/record MIME type and uses recordMap
+  // Deep-clone a snapshot, stripping non-serializable / internal fields that
+  // Feishu's server rejects (React fibers, circular refs, internal keys, etc.).
+  function sanitizeSnapshotForRecord(snap) {
+    if (!snap || typeof snap !== 'object') return snap;
+    // Keys that are internal to the editor and must NOT appear in paste data.
+    var internalKeys = {
+      _reactRootContainer: true,
+      _owner: true,
+      _store: true,
+      _self: true,
+      _source: true,
+      __reactInternalInstance$: true,
+      __reactFiber$: true,
+    };
+    try {
+      return JSON.parse(JSON.stringify(snap, function (key, value) {
+        if (internalKeys[key]) return undefined;
+        // Skip functions and symbols entirely.
+        if (typeof value === 'function' || typeof value === 'symbol') return undefined;
+        return value;
+      }));
+    } catch (e) {
+      // If JSON.stringify fails (circular ref), fall back to shallow clone of safe keys.
+      var out = {};
+      Object.keys(snap).forEach(function (k) {
+        if (internalKeys[k]) return;
+        var v = snap[k];
+        if (typeof v === 'function' || typeof v === 'symbol') return;
+        try { JSON.stringify(v); out[k] = v; } catch (e2) {}
+      });
+      return out;
+    }
+  }
+
+  // to reconstruct block structure (type, children, style properties).
+  function buildDocxRecordPayload(ss) {
+    if (!ss || !ss.rootBlock) return null;
+    var recordMap = {};
+    var blockIds = [];
+    var recordIds = [];
+    var rootId = '';
+    var payloadMap = {};
+
+    function walk(block, depth, parentBlock) {
+      if (!block || depth > MAX_BLOCK_DEPTH) return;
+      if (block.record && block.record.id && block.record.snapshot) {
+        var snap = block.record.snapshot;
+        var recordId = block.record.id;
+        var cleanSnap = sanitizeSnapshotForRecord(snap);
+
+        recordMap[recordId] = { id: recordId, snapshot: cleanSnap };
+
+        if (cleanSnap.type === 'page') {
+          if (!rootId) rootId = recordId;
+        } else {
+          // Only page's direct children go into recordIds/blockIds/selection.
+          // Deeper blocks are referenced via parent's "children" array in snapshot
+          // and go into payloadMap only — matching Feishu's native copy format.
+          var isDirectChildOfPage = parentBlock && parentBlock.record &&
+            parentBlock.record.snapshot && parentBlock.record.snapshot.type === 'page';
+          if (isDirectChildOfPage) {
+            recordIds.push(recordId);
+            blockIds.push(recordIds.length + 1);
+          } else if (parentBlock && parentBlock.record && parentBlock.record.snapshot) {
+            var parentType = parentBlock.record.snapshot.type;
+            if (parentType && parentType !== 'page') {
+              payloadMap[recordId] = { level: depth };
+            }
+          }
+        }
+      }
+      getBlockChildren(block).forEach(function (child) {
+        walk(child, depth + 1, block);
+      });
+    }
+
+    walk(ss.rootBlock, 0, null);
+    if (!rootId || !recordIds.length) return null;
+
+    return {
+      isCut: false,
+      rootId: rootId,
+      parentId: rootId,
+      blockIds: blockIds,
+      recordIds: recordIds,
+      recordMap: recordMap,
+      payloadMap: payloadMap,
+      extra: {
+        channel: 'saas',
+        pasteRandomId: generateRandomId(),
+        mention_page_title: {},
+        external_mention_url: {},
+        isEqualBlockSelection: true,
+      },
+      isKeepQuoteContainer: false,
+      selection: recordIds.map(function(rid, i) {
+        return { id: i + 2, type: 'block', recordId: rid };
+      }),
+      pasteFlag: generateRandomId(),
+    };
+  }
+
+  function generateRandomId() {
+    return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
+      var r = Math.random() * 16 | 0;
+      var v = c === 'x' ? r : (r & 0x3 | 0x8);
+      return v.toString(16);
+    });
+  }
+
+  // Extract callout style (background_color, border_color) from the rendered DOM
+  // because Feishu structService snapshot does not store these values.
+  // Feishu's native docx/record uses CSS rgb strings like "rgb(236,226,254)".
+  function extractCalloutStyleFromDOM(blockId) {
+    var result = { background_color: '', border_color: '' };
+    try {
+      // Feishu renders callout blocks with data-block-id attributes
+      var escapedId = blockId ? blockId.replace(/"/g, '\\"') : '';
+      var selector = escapedId
+        ? '[data-block-id="' + escapedId + '"]'
+        : '[data-block-type="callout"]';
+      var el = document.querySelector(selector);
+      if (!el) {
+        // Fallback: search by class
+        var callouts = document.querySelectorAll('.docx-callout-block, .callout-container');
+        for (var i = 0; i < callouts.length; i++) {
+          if (callouts[i].getAttribute('data-block-id') === blockId || !blockId) {
+            el = callouts[i];
+            break;
+          }
+        }
+      }
+      if (!el) return result;
+      var computed = window.getComputedStyle(el);
+      var bg = computed.backgroundColor;
+      var brd = computed.borderColor || computed.borderLeftColor;
+      if (bg && bg !== 'rgba(0, 0, 0, 0)' && bg !== 'transparent') {
+        result.background_color = normalizeCssRgb(bg);
+      }
+      if (brd && brd !== 'rgba(0, 0, 0, 0)' && brd !== 'transparent') {
+        result.border_color = normalizeCssRgb(brd);
+      }
+    } catch (e) {}
+    return result;
+  }
+
+  // Normalize CSS rgb() to Feishu's format: "rgb(R,G,B)" (no spaces).
+  function normalizeCssRgb(str) {
+    if (!str) return '';
+    var m = str.match(/rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)/);
+    if (m) return 'rgb(' + m[1] + ',' + m[2] + ',' + m[3] + ')';
+    return str;
+  }
+
   function extractFullDoc() {
     var ss = getStructService();
     if (!ss || !ss.rootBlock) return extractVisibleDomFallback();
@@ -1954,8 +2270,15 @@
           return;
         }
 
+        // Callout colors are not stored in the structService snapshot.
+        // Read them from the rendered DOM element instead.
+        if (type === 'callout' && !snap.background_color) {
+          var domStyle = extractCalloutStyleFromDOM(block.record.id);
+          if (domStyle.background_color) snap.background_color = domStyle.background_color;
+          if (domStyle.border_color) snap.border_color = domStyle.border_color;
+        }
+
         blockTypeCounts[type] = (blockTypeCounts[type] || 0) + 1;
-        var childContent = collectRenderedChildBlocks(block, depth, processBlockInner);
 
         var decoded = decodeBlockText(snap);
         if (type === 'image') imageBlockCount++;
@@ -1964,9 +2287,9 @@
           equationBlockCount++;
         }
 
+        var childContent = collectRenderedChildBlocks(block, depth, processBlockInner);
         var html = blockToHtml(snap, block, childContent.html);
         var md = blockToMarkdown(snap, block, childContent.md);
-
         if (html) htmlParts.push(html);
         if (md) mdParts.push(md);
         blockCount++;
@@ -1994,11 +2317,15 @@
 
     var finalHtml = finalizeHtmlFragment(htmlParts.join('\n'));
     var finalText = normalizePlainText(mdParts.join('\n'));
+    var docxRecord = buildDocxRecordPayload(ss);
+    // Expose for debugging — inspect via __feishuLastDocxRecord in console.
+    window.__feishuLastDocxRecord = docxRecord;
     var result = {
       html: finalHtml,
       text: finalText,
       blockCount: blockCount,
       equationCount: equationCount,
+      docxRecord: docxRecord ? JSON.stringify(docxRecord) : '',
     };
 
     result.extractionDebug = updateLastExtractionDebug({
@@ -2150,10 +2477,11 @@
 
   function convertImagesToBase64(html) {
     var imgUrls = [];
-    var urlRegex = /src="(https?:\/\/[^"]+\/space\/api\/box\/stream\/download\/[^"]+)"/g;
+    var tokenToBase64 = {}; // token → base64 mapping for recordMap patching
+    var urlRegex = /src="(https?:\/\/[^"]+\/space\/api\/box\/stream\/download\/preview\/([^/?"]+)[^"]*)"/g;
     var match;
     while ((match = urlRegex.exec(html)) !== null) {
-      imgUrls.push({ url: match[1], full: match[0] });
+      imgUrls.push({ url: match[1], full: match[0], token: match[2] });
     }
 
     if (imgUrls.length === 0) {
@@ -2190,6 +2518,7 @@
           showToast('📷 转换图片中 ' + done + '/' + total);
           if (base64) {
             html = html.replace(item.full, 'src="' + base64 + '"');
+            if (item.token) tokenToBase64[item.token] = base64;
           }
         });
       };
@@ -2212,7 +2541,7 @@
         total: total,
         error: '',
       });
-      return html;
+      return { html: html, tokenToBase64: tokenToBase64 };
     }).catch(function (error) {
       updateImageConversionStatus({
         state: 'error',
@@ -2311,6 +2640,7 @@
             html: content.html,
             text: content.text,
             clipboardHtml: payload.html,
+            docxRecord: payload.docxRecord || content.docxRecord || '',
             title: docTitle,
           }).then(function () {
             var imgCount = countExtractedImages(content);
@@ -2571,7 +2901,8 @@
 
   function exportDocumentAsHtml() {
     withExtractedDocument('⏳ 导出 HTML 中...', '⚠️ 导出失败，请确保文档已加载', function (content, docTitle) {
-      convertImagesToBase64(content.html).then(function (htmlWithImages) {
+      convertImagesToBase64(content.html).then(function (result) {
+        var htmlWithImages = result.html || result;
         var fullHtml = buildExportHtml(docTitle, htmlWithImages);
         var safeName = docTitle.replace(/[\\/:*?"<>|]/g, '_').trim() || 'feishu-export';
         downloadTextFile(safeName + '.html', fullHtml, 'text/html;charset=utf-8');
@@ -2636,31 +2967,99 @@
   }
 
   function buildClipboardPayload(content) {
+    document.documentElement.setAttribute('data-feishu-debug', 'buildClipboardPayload-called');
     var text = content && content.text ? content.text : '';
     var preparedHtml = content && content.clipboardHtml ? content.clipboardHtml : '';
     var html = content && content.html ? content.html : '';
+    var docxRecord = content && content.docxRecord ? content.docxRecord : '';
     if (preparedHtml) {
+      document.documentElement.setAttribute('data-feishu-debug', 'buildClipboardPayload-shortcircuit');
       return Promise.resolve({
         text: text,
         html: preparedHtml,
+        docxRecord: docxRecord,
       });
     }
     if (!html) {
       return Promise.resolve({
         text: text,
         html: '',
+        docxRecord: docxRecord,
       });
     }
 
-    return convertImagesToBase64(html).then(function (htmlWithImages) {
+    var docxRecordObj = null;
+    try { docxRecordObj = docxRecord ? JSON.parse(docxRecord) : null; } catch (e) {}
+
+    return convertImagesToBase64(html).then(function (result) {
+      var htmlWithImages = result.html || result;
+      var tokenToBase64 = result.tokenToBase64 || {};
+
+      document.documentElement.setAttribute('data-feishu-debug', 'convertImages-base64keys-' + Object.keys(tokenToBase64).length);
+
+      // Remove image blocks from recordMap — their internal tokens are
+      // invalid cross-document and base64 cannot be used as a token.
+      // Images will render from the HTML body (which has base64 data URLs).
+      var removedImageCount = 0;
+      if (docxRecordObj && docxRecordObj.recordMap) {
+        // First pass: collect image IDs
+        var imageIds = new Set();
+        Object.keys(docxRecordObj.recordMap).forEach(function (rid) {
+          var rec = docxRecordObj.recordMap[rid];
+          if (rec && rec.snapshot && rec.snapshot.type === 'image') {
+            imageIds.add(rid);
+          }
+        });
+        // Second pass: remove image records and clean up children arrays
+        imageIds.forEach(function (rid) {
+          delete docxRecordObj.recordMap[rid];
+          removedImageCount++;
+        });
+        Object.keys(docxRecordObj.recordMap).forEach(function (rid) {
+          var snap = docxRecordObj.recordMap[rid].snapshot;
+          if (snap && Array.isArray(snap.children)) {
+            var origLen = snap.children.length;
+            snap.children = snap.children.filter(function (childId) {
+              return !imageIds.has(childId);
+            });
+          }
+        });
+        // Also remove image IDs from recordIds/blockIds/selection
+        if (Array.isArray(docxRecordObj.recordIds)) {
+          docxRecordObj.recordIds = docxRecordObj.recordIds.filter(function (rid) {
+            return !imageIds.has(rid);
+          });
+        }
+        if (Array.isArray(docxRecordObj.blockIds)) {
+          // Re-number blockIds to match filtered recordIds
+          docxRecordObj.blockIds = docxRecordObj.recordIds.map(function (_, i) {
+            return i + 2;
+          });
+        }
+        if (Array.isArray(docxRecordObj.selection)) {
+          docxRecordObj.selection = docxRecordObj.recordIds.map(function (rid, i) {
+            return { id: i + 2, type: 'block', recordId: rid };
+          });
+        }
+        // Clean payloadMap too
+        if (docxRecordObj.payloadMap) {
+          imageIds.forEach(function (rid) {
+            delete docxRecordObj.payloadMap[rid];
+          });
+        }
+      }
+      document.documentElement.setAttribute('data-feishu-debug', 'removed-images-' + removedImageCount);
+
       return {
         text: text,
-        html: buildClipboardHtml(htmlWithImages),
+        html: buildClipboardHtml(htmlWithImages, docxRecordObj),
+        docxRecord: docxRecordObj ? JSON.stringify(docxRecordObj) : '',
       };
     }).catch(function () {
       return {
         text: text,
-        html: buildClipboardHtml(html),
+        html: buildClipboardHtml(html, docxRecordObj),
+        docxRecord: docxRecord,
       };
     });
   }
@@ -2670,6 +3069,7 @@
       var handled = false;
       var text = payload && payload.text ? payload.text : '';
       var html = payload && payload.html ? payload.html : '';
+      var docxRecord = payload && payload.docxRecord ? payload.docxRecord : '';
 
       function cleanup() {
         document.removeEventListener('copy', onCopy, true);
@@ -2682,6 +3082,7 @@
         if (e.clipboardData) {
           if (text) e.clipboardData.setData('text/plain', text);
           if (html) e.clipboardData.setData('text/html', html);
+          if (docxRecord) e.clipboardData.setData('docx/record', docxRecord);
         }
       }
 
@@ -2705,10 +3106,12 @@
   function writeClipboardPayload(payload) {
     var text = payload && payload.text ? payload.text : '';
     var html = payload && payload.html ? payload.html : '';
+    var docxRecord = payload && payload.docxRecord ? payload.docxRecord : '';
     var clipboardData = {};
 
     if (text) clipboardData['text/plain'] = new Blob([text], { type: 'text/plain' });
     if (html) clipboardData['text/html'] = new Blob([html], { type: 'text/html' });
+    if (docxRecord) clipboardData['docx/record'] = new Blob([docxRecord], { type: 'text/plain' });
 
     if (!Object.keys(clipboardData).length) {
       return Promise.reject(new Error('clipboard payload empty'));
@@ -2727,6 +3130,7 @@
     var preparedPayload = {
       text: content && content.text ? content.text : '',
       html: content && content.clipboardHtml ? content.clipboardHtml : '',
+      docxRecord: content && content.docxRecord ? content.docxRecord : '',
     };
 
     if (preparedPayload.html || !(content && content.html)) {
@@ -2740,8 +3144,8 @@
     var text = payload && payload.text ? payload.text : '';
     var html = payload && payload.html ? payload.html : '';
     var source = text + '\n' + html;
-    var hasFeishuCalloutHtml = payloadHasFeishuCalloutHtml(payload);
-    var requiresNativeParsing = !hasFeishuCalloutHtml && (
+    var hasFeishuStructuredHtml = payloadHasFeishuStructuredHtml(payload);
+    var requiresNativeParsing = !hasFeishuStructuredHtml && (
       /^\s*>\s*\[!(NOTE|WARNING|TIP|CAUTION|IMPORTANT|SUCCESS|INFO)\]/mi.test(source) ||
       /(^|[^\\])\$\$?[\s\S]+?\$\$?/.test(source) ||
       /\\\([\s\S]+?\\\)/.test(source) ||
@@ -2751,7 +3155,7 @@
     // Any LaTeX-like marker should go through Feishu's native paste parser.
     // Direct DOM insertion preserves the literal "$...$" text but does not
     // trigger the editor's formula conversion, which is most visible in lists.
-    if (hasFeishuCalloutHtml) {
+    if (hasFeishuStructuredHtml) {
       return {
         mode: 'dispatchPasteEvent',
         requiresNativeParsing: false,
@@ -2768,12 +3172,13 @@
     return getPastePayloadHandlingMode(payload).requiresNativeParsing;
   }
 
-  function payloadHasFeishuCalloutHtml(payload) {
+  function payloadHasFeishuStructuredHtml(payload) {
     var html = payload && payload.html ? payload.html : '';
-    if (!html) return false;
-    return /data-block-type=("|')callout\1/i.test(html) &&
-      /data-lark-record-data=/i.test(html) &&
-      /data-meta-block-props=/i.test(html);
+    var hasDocxRecord = payload && payload.docxRecord ? true : false;
+    if (!html && !hasDocxRecord) return false;
+    // Feishu native copy signals structured data via data-docx-has-block-data="true"
+    // in HTML AND provides docx/record MIME type on the clipboard.
+    return /data-docx-has-block-data="true"/i.test(html) && hasDocxRecord;
   }
 
   function extractInsertionHtml(html) {
@@ -2913,6 +3318,7 @@
     var dt = new DataTransfer();
     if (payload && payload.text) dt.setData('text/plain', payload.text);
     if (payload && payload.html) dt.setData('text/html', payload.html);
+    if (payload && payload.docxRecord) dt.setData('docx/record', payload.docxRecord);
 
     try {
       var beforeInputEvent = new InputEvent('beforeinput', {
@@ -2948,7 +3354,7 @@
       function commitPayload(payload) {
         var needsParser = payloadRequiresPasteParsing(payload);
         var canAutoDispatch = shouldAutoDispatchPastePayload(payload);
-        var preferPasteEventOnly = payloadHasFeishuCalloutHtml(payload);
+        var preferPasteEventOnly = payloadHasFeishuStructuredHtml(payload);
         var needsManualPaste = needsParser && !canAutoDispatch;
 
         writeClipboardPayload(payload).then(function () {
@@ -3392,6 +3798,86 @@
   // a DOM CustomEvent which IS visible across worlds.
   registerEventListener(document, 'feishu-capture-snapshot', function () {
     try { captureValidationSnapshot(); } catch (e) {}
+  }, true);
+  // Listen for API exploration requests from AppleScript's JS context.
+  // Runs findEditorPaths in TM's context (which has React fiber access)
+  // and writes the result to a DOM attribute for cross-context reading.
+  registerEventListener(document, 'feishu-explore-api', function (e) {
+    try {
+      var pattern = e.detail && e.detail.pattern ? new RegExp(e.detail.pattern, 'i') : /insert|command|apply|mutation|addBlock|createBlock|updateBlock|paste|clipboard/;
+      var result = window.__feishuFindEditorPaths(pattern);
+      document.documentElement.setAttribute('data-feishu-api-paths', JSON.stringify(result));
+    } catch (err) {
+      document.documentElement.setAttribute('data-feishu-api-paths', JSON.stringify({ error: String(err.message || err) }));
+    }
+  }, true);
+  // Listen for editor path resolution requests from AppleScript's JS context.
+  // Reads a nested property from editorAPI (which requires React fiber access)
+  // and writes the result to a DOM attribute.
+  registerEventListener(document, 'feishu-resolve-path', function (e) {
+    try {
+      var path = e.detail && e.detail.path ? String(e.detail.path) : '';
+      if (!path) {
+        document.documentElement.setAttribute('data-feishu-path-result', JSON.stringify({ error: 'no path' }));
+        return;
+      }
+      var editorAPI = getEditorAPI();
+      if (!editorAPI) {
+        document.documentElement.setAttribute('data-feishu-path-result', JSON.stringify({ error: 'no editorAPI' }));
+        return;
+      }
+      var parts = path.replace(/^editorAPI\./, '').split('.');
+      var obj = editorAPI;
+      for (var i = 0; i < parts.length; i++) {
+        if (obj == null) break;
+        obj = obj[parts[i]];
+      }
+      var resultType = typeof obj;
+      var result;
+      if (obj === null || obj === undefined) {
+        result = { path: path, type: 'null' };
+      } else if (resultType === 'function') {
+        result = { path: path, type: 'function', name: obj.name || '', length: obj.length };
+      } else if (resultType === 'object') {
+        var keys = [];
+        try { keys = Object.keys(obj).slice(0, 50); } catch (err) {}
+        result = { path: path, type: 'object', keys: keys };
+      } else {
+        var str = String(obj);
+        result = { path: path, type: resultType, value: str.length > 500 ? str.slice(0, 500) + '...' : str };
+      }
+      document.documentElement.setAttribute('data-feishu-path-result', JSON.stringify(result));
+    } catch (err) {
+      document.documentElement.setAttribute('data-feishu-path-result', JSON.stringify({ error: String(err.message || err) }));
+    }
+  }, true);
+  // Listen for native copy capture requests from AppleScript's JS context.
+  registerEventListener(document, 'feishu-capture-copy', function () {
+    try {
+      if (typeof window.__feishuCaptureNextCopy === 'function') {
+        window.__feishuCaptureNextCopy();
+      }
+    } catch (e) {}
+  }, true);
+  // Listen for copy capture result reading from AppleScript's JS context.
+  registerEventListener(document, 'feishu-read-copy-capture', function () {
+    try {
+      var capture = window.__feishuLastCopyCapture || null;
+      if (capture) {
+        // Only keep the essential data (HTML and MIME types), not raw Blobs
+        var summary = {
+          types: Object.keys(capture.rawData || {}),
+          htmlLength: 0,
+          htmlPreview: '',
+        };
+        var htmlData = capture.rawData && capture.rawData['text/html'];
+        if (htmlData && htmlData.text) {
+          summary.htmlLength = htmlData.text.length;
+          summary.htmlPreview = htmlData.text.slice(0, 5000);
+        }
+        document.documentElement.setAttribute('data-feishu-copy-capture', JSON.stringify(summary));
+      }
+    } catch (e) {}
   }, true);
 
   window.__feishuHelperVersion = SCRIPT_VERSION;
