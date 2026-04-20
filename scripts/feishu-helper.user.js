@@ -2966,6 +2966,9 @@
           var hasDowngradedImages = !!(payload && payload.hasDowngradedImages) || /data-feishu-downgraded-images="true"/i.test(String(payload && payload.html || ''));
           var hasImagesToInject = !!(payload && payload.hasImagesToInject);
           var orderedImageBase64List = (payload && payload.orderedImageBase64List) || [];
+          var withBase64 = orderedImageBase64List.filter(function (img) { return !!img.base64; }).length;
+          document.documentElement.setAttribute('data-feishu-debug',
+            'extraction-listLen=' + orderedImageBase64List.length + '-withBase64=' + withBase64);
           // Use the docxRecord from the payload (which has image blocks removed
           // when images need injection).  Don't fall back to content.docxRecord
           // which would include the invalid image tokens.
@@ -3014,10 +3017,11 @@
                 textLen: result.textLen,
                 htmlLen: result.htmlLen,
                 clipboardHtmlLen: result.clipboardHtmlLen,
-                hasDowngradedImages: result.hasDowngradedImages,
-                hasImagesToInject: result.hasImagesToInject,
-                imageInjectCount: result.imageInjectCount,
-                payloadError: false,
+              hasDowngradedImages: result.hasDowngradedImages,
+              hasImagesToInject: result.hasImagesToInject,
+              imageInjectCount: result.imageInjectCount,
+              imageInjectWithBase64: withBase64,
+              payloadError: false,
                 ts: Date.now(),
               }));
               if (snap) {
@@ -3467,43 +3471,27 @@
       // callout, table_cell etc. are NOT in recordIds (only direct children
       // of the page are).  We must walk the tree recursively.
       var orderedImageBase64List = [];
-      if (docxRecordObj && tokenCount > 0) {
+      if (docxRecordObj) {
         var recordMap = docxRecordObj.recordMap || {};
         var imageBlocksFound = 0;
         var tokensMatched = 0;
-        var tokenKeys = Object.keys(tokenToBase64);
 
-        // Recursively walk the block tree in document order
-        function collectImageRecords(snapshot) {
-          if (!snapshot) return;
-          if (snapshot.type === 'image' && snapshot.image) {
+        // Walk ALL records in recordMap directly (like replaceTokensInDocxRecord)
+        // This catches image blocks that might not be reachable via children chain
+        // (e.g. inside table cells).
+        Object.keys(recordMap).forEach(function (recordId) {
+          var record = recordMap[recordId];
+          if (record && record.snapshot && record.snapshot.type === 'image' && record.snapshot.image) {
             imageBlocksFound++;
-            var token = snapshot.image.token || '';
+            var token = record.snapshot.image.token || '';
             var base64 = tokenToBase64[token] || '';
             if (base64) tokensMatched++;
             orderedImageBase64List.push({
               token: token,
               base64: base64,
-              width: snapshot.image.width || 0,
-              height: snapshot.image.height || 0,
+              width: record.snapshot.image.width || 0,
+              height: record.snapshot.image.height || 0,
             });
-          }
-          // Walk children
-          var children = snapshot.children || [];
-          children.forEach(function (childId) {
-            var childRecord = recordMap[childId];
-            if (childRecord && childRecord.snapshot) {
-              collectImageRecords(childRecord.snapshot);
-            }
-          });
-        }
-
-        // Start from all root-level blocks
-        var recordIds = docxRecordObj.recordIds || [];
-        recordIds.forEach(function (recordId) {
-          var record = recordMap[recordId];
-          if (record && record.snapshot) {
-            collectImageRecords(record.snapshot);
           }
         });
 
@@ -3534,19 +3522,75 @@
       // target document, obtain valid tokens, and replace the old tokens
       // in docxRecord before pasting.  This preserves the complete structure
       // (grid/table/callout with embedded images) via the docx/record paste path.
-      var hasImages = orderedImageBase64List.length > 0;
-      var shouldDowngrade = false; // No longer downgrade — upload replaces tokens instead
+      // For image blocks in docxRecord that have no matching base64 in tokenToBase64
+      // (e.g. images nested inside table cells that don't appear in HTML),
+      // fetch them directly using the token via the internal download API.
+      var unmatchedImageTokens = [];
+      var unmatchedTokenValues = [];
+      orderedImageBase64List.forEach(function (img) {
+        if (img.token && !img.base64) {
+          unmatchedImageTokens.push(img);
+          unmatchedTokenValues.push(img.token);
+        }
+      });
 
-      return {
-        text: text,
-        html: buildClipboardHtml(htmlWithImages, docxRecordObj, false),
-        docxRecord: docxRecordObj ? JSON.stringify(docxRecordObj) : '',
-        hasDowngradedImages: false,
-        hasImagesToInject: hasImages,
-        hasImagesToUpload: hasImages,
-        orderedImageBase64List: orderedImageBase64List,
-        originalDocxRecordObj: docxRecordObj,
-      };
+      var fetchMissingChain = Promise.resolve();
+      if (unmatchedImageTokens.length > 0) {
+        document.documentElement.setAttribute('data-feishu-debug',
+          'unmatchedImageTokens-' + unmatchedImageTokens.length +
+          '-tokens=' + JSON.stringify(unmatchedTokenValues));
+        unmatchedImageTokens.forEach(function (img) {
+          fetchMissingChain = fetchMissingChain.then(function () {
+            // Try multiple download URL patterns for the token
+            var urls = [
+              '/space/api/box/stream/download/all/?token=' + encodeURIComponent(img.token),
+              '/space/api/box/stream/download/preview/' + encodeURIComponent(img.token) + '/?preview_type=16',
+            ];
+            function tryFetchUrl(index) {
+              if (index >= urls.length) return Promise.resolve(null);
+              return fetchImageAsBase64(urls[index]).then(function (b64) {
+                if (b64) return b64;
+                return tryFetchUrl(index + 1);
+              });
+            }
+            return tryFetchUrl(0).then(function (base64) {
+              if (base64) {
+                img.base64 = base64;
+                document.documentElement.setAttribute('data-feishu-debug',
+                  'fetchMissing-ok-token=' + img.token + '-b64len=' + base64.length);
+              } else {
+                document.documentElement.setAttribute('data-feishu-debug',
+                  'fetchMissing-fail-token=' + img.token);
+                console.warn('[feishu-helper] Failed to fetch base64 for token:', img.token);
+              }
+            });
+          });
+        });
+      }
+
+      return fetchMissingChain.then(function () {
+        var matchedCount = orderedImageBase64List.filter(function (img) { return !!img.base64; }).length;
+        document.documentElement.setAttribute('data-feishu-debug',
+          'imgBlocks-' + imageBlocksFound + '-tokensMatched-' + tokensMatched +
+          '-unmatched-' + unmatchedImageTokens.length +
+          '-fetched-' + (matchedCount - tokensMatched) +
+          '-totalWithBase64-' + matchedCount +
+          '-listLen-' + orderedImageBase64List.length);
+
+        var hasImages = orderedImageBase64List.length > 0;
+        var shouldDowngrade = false; // No longer downgrade — upload replaces tokens instead
+
+        return {
+          text: text,
+          html: buildClipboardHtml(htmlWithImages, docxRecordObj, false),
+          docxRecord: docxRecordObj ? JSON.stringify(docxRecordObj) : '',
+          hasDowngradedImages: false,
+          hasImagesToInject: hasImages,
+          hasImagesToUpload: hasImages,
+          orderedImageBase64List: orderedImageBase64List,
+          originalDocxRecordObj: docxRecordObj,
+        };
+      });
     }).catch(function () {
       return {
         text: text,
@@ -3599,6 +3643,24 @@
     var text = payload && payload.text ? payload.text : '';
     var html = payload && payload.html ? payload.html : '';
     var docxRecord = payload && payload.docxRecord ? payload.docxRecord : '';
+    // Debug: check if docxRecord has replaced tokens
+    try {
+      var drObj = docxRecord ? JSON.parse(docxRecord) : null;
+      if (drObj && drObj.recordMap) {
+        var imgCount = 0;
+        var sampleToken = '';
+        Object.keys(drObj.recordMap).forEach(function (rid) {
+          var r = drObj.recordMap[rid];
+          if (r && r.snapshot && r.snapshot.type === 'image' && r.snapshot.image) {
+            imgCount++;
+            if (!sampleToken) sampleToken = r.snapshot.image.token || '';
+          }
+        });
+        document.documentElement.setAttribute('data-feishu-clipboard-debug',
+          'writeClipboard: imgBlocks=' + imgCount + ', sampleToken=' + sampleToken +
+          ', docxLen=' + (docxRecord || '').length);
+      }
+    } catch (e) {}
     var clipboardData = {};
 
     if (text) clipboardData['text/plain'] = new Blob([text], { type: 'text/plain' });
@@ -4359,6 +4421,10 @@
 
       orderedImageBase64List.forEach(function (img, index) {
         chain = chain.then(function () {
+          // Skip images with no base64 data (e.g. failed fetch)
+          if (!img.base64) {
+            return { token: '', error: 'no base64 data' };
+          }
           return uploadBase64ImageViaApi(img.base64, img.width, img.height, discoveredApi, resolvedObjToken);
         }).then(function (result) {
           if (result.token) {
@@ -4386,16 +4452,31 @@
     var clone = JSON.parse(JSON.stringify(docxRecordObj));
     var recordMap = clone.recordMap || {};
     var replaced = 0;
+    var docxTokens = [];
+    var mapKeys = Object.keys(tokenMap);
     Object.keys(recordMap).forEach(function (recordId) {
       var record = recordMap[recordId];
       if (record && record.snapshot && record.snapshot.type === 'image' && record.snapshot.image) {
         var oldToken = record.snapshot.image.token || '';
+        docxTokens.push(oldToken);
         if (oldToken && tokenMap[oldToken]) {
           record.snapshot.image.token = tokenMap[oldToken];
           replaced++;
         }
       }
     });
+    var debugInfo = 'replaceTokens: replaced=' + replaced +
+      '/' + docxTokens.length + ' docxImageTokens, tokenMapKeys=' + mapKeys.length +
+      ', sampleDocxToken=' + (docxTokens[0] || 'none') +
+      ', sampleMapKey=' + (mapKeys[0] || 'none') +
+      ', overlap=' + docxTokens.filter(function(t) { return !!tokenMap[t]; }).length;
+    // Log unmatched docxTokens for debugging table images
+    var unmatchedDocxTokens = docxTokens.filter(function(t) { return !tokenMap[t]; });
+    if (unmatchedDocxTokens.length > 0) {
+      debugInfo += ', unmatchedDocxTokens=' + JSON.stringify(unmatchedDocxTokens);
+    }
+    console.log('[feishu-helper] ' + debugInfo);
+    try { document.documentElement.setAttribute('data-feishu-token-replace-debug', debugInfo); } catch(e) {}
     return clone;
   }
 
