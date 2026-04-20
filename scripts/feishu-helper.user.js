@@ -4246,7 +4246,11 @@
 
     if (isWiki && docToken) {
       // For wiki pages, we need to resolve the obj_token first
-      return _originalFetch('/space/api/wiki/v2/tree/get_node/?wiki_token=' + docToken + '&expand_shortcut=true&with_deleted=true', {
+      // `my.feishu.cn` wiki pages resolve successfully via the GET endpoint.
+      // The POST variant returns 404 there, which leaves us using the wiki
+      // token as mount_node_token and causes image uploads to return
+      // `mount node not exist`, producing an empty tokenMap.
+      return _originalFetch('/space/api/wiki/v2/tree/get_node/?wiki_token=' + encodeURIComponent(docToken) + '&expand_shortcut=true&with_deleted=true', {
         credentials: 'include',
       }).then(function (r) {
         return r.json();
@@ -4257,6 +4261,7 @@
         if (node.obj_token) {
           objToken = node.obj_token;
         }
+        console.info('[Feishu Helper] Wiki obj_token resolved:', { wikiToken: docToken, objToken: objToken });
         var result = {
           captured: [uploadApi],
           objToken: objToken,
@@ -4268,7 +4273,8 @@
             JSON.stringify(result));
         } catch (e) {}
         return result;
-      }).catch(function () {
+      }).catch(function (err) {
+        console.warn('[Feishu Helper] Failed to resolve wiki obj_token:', err);
         return {
           captured: [uploadApi],
           objToken: docToken,

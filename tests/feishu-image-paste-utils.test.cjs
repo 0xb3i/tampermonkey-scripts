@@ -114,3 +114,9 @@ test('userscript preserves downgraded image marker during clipboard html sanitiz
   const source = fs.readFileSync(path.join(__dirname, '../scripts/feishu-helper.user.js'), 'utf8');
   assert.match(source, /'data-feishu-downgraded-images'\s*:\s*true/);
 });
+
+test('userscript resolves wiki obj_token with the GET get_node endpoint', () => {
+  const source = fs.readFileSync(path.join(__dirname, '../scripts/feishu-helper.user.js'), 'utf8');
+  assert.match(source, /\/space\/api\/wiki\/v2\/tree\/get_node\/\?wiki_token=/);
+  assert.doesNotMatch(source, /_originalFetch\('\/space\/api\/wiki\/v2\/tree\/get_node\/', \{\s*method:\s*'POST'/);
+});
