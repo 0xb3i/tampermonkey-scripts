@@ -5,6 +5,11 @@ const { cpSync, existsSync, mkdtempSync, readFileSync, rmSync } = require('fs');
 const { DatabaseSync } = require('node:sqlite');
 const { join, resolve } = require('path');
 const { homedir, tmpdir } = require('os');
+const {
+  buildSnapshotSignature,
+  runPasteAttemptWithFallback,
+  runPostValidationCleanup,
+} = require('./feishu-paste-fallback-utils.cjs');
 
 const DEFAULT_VIEWPORT = { width: 1440, height: 960 };
 const DEFAULT_SCRIPT_PATH = join(__dirname, 'feishu-helper.user.js');
@@ -545,6 +550,18 @@ function triggerNativePasteInActiveChrome() {
   };
 }
 
+function triggerPostValidationCleanupInActiveChrome() {
+  runAppleScriptLines([
+    'tell application "Google Chrome" to activate',
+    'tell application "System Events" to keystroke "a" using command down',
+    'delay 0.1',
+    'tell application "System Events" to key code 51',
+  ]);
+  return {
+    shortcut: 'Cmd+A+Backspace',
+  };
+}
+
 function triggerShortcutInActiveChrome(key) {
   const shortcutKey = String(key || '').toLowerCase();
   if (!shortcutKey) {
@@ -650,6 +667,9 @@ function summarizeSourceExtractionForLog(extraction) {
     textLen: Number(extraction.textLen || 0),
     htmlLen: Number(extraction.htmlLen || 0),
     clipboardHtmlLen: Number(extraction.clipboardHtmlLen || 0),
+    hasDowngradedImages: Boolean(extraction.hasDowngradedImages),
+    hasImagesToInject: Boolean(extraction.hasImagesToInject),
+    imageInjectCount: Number(extraction.imageInjectCount || 0),
     payloadError: Boolean(extraction.payloadError),
     extractionDebug: extraction.extractionDebug || null,
     validationSnapshot: extraction.validationSnapshot ? {
@@ -666,6 +686,64 @@ function summarizeSourceExtractionForLog(extraction) {
     } : null,
     pendingPaste: extraction.pendingPaste || null,
   };
+}
+
+function shouldPreferNativeClipboardPasteForValidation(extraction) {
+  return Boolean(extraction && (extraction.hasDowngradedImages || extraction.hasImagesToInject));
+}
+
+function prepareNativeClipboardForValidation(extraction, options) {
+  if (!shouldPreferNativeClipboardPasteForValidation(extraction)) {
+    return {
+      attempted: false,
+      skipped: true,
+      summary: null,
+    };
+  }
+
+  const prepare = options && typeof options.prepare === 'function'
+    ? options.prepare
+    : null;
+  if (!prepare) {
+    throw new Error('A prepare callback is required when native clipboard paste is preferred.');
+  }
+
+  return {
+    attempted: true,
+    skipped: false,
+    summary: prepare() || null,
+  };
+}
+
+function preparePendingPasteForNativePasteInActiveChrome(options) {
+  const sourceUrl = options && options.url ? String(options.url) : '';
+  const injectScript = options && options.injectScript ? String(options.injectScript) : '';
+
+  return runConfiguredPageScriptInActiveChrome({
+    url: sourceUrl,
+    injectScript,
+    reload: false,
+    waitForFeishuEditor: true,
+    pageScript: `
+      const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+      document.documentElement.removeAttribute('data-feishu-native-paste-prepare');
+      document.dispatchEvent(new CustomEvent('feishu-prepare-native-paste'));
+      for (let i = 0; i < 150; i++) {
+        const raw = document.documentElement.getAttribute('data-feishu-native-paste-prepare');
+        if (raw) {
+          const parsed = (() => { try { return JSON.parse(raw); } catch (error) { return { status: 'error', error: String(error && error.stack ? error.stack : error) }; } })();
+          if (parsed && parsed.status && parsed.status !== 'running') {
+            if (parsed.status === 'error') {
+              throw new Error(parsed.error || 'Unknown native paste preparation error.');
+            }
+            return parsed.summary || null;
+          }
+        }
+        await sleep(200);
+      }
+      throw new Error('Timed out waiting for native paste preparation.');
+    `,
+  });
 }
 
 function openActiveChromeUrlForShortcut(url, options) {
@@ -686,13 +764,26 @@ function openActiveChromeUrlForShortcut(url, options) {
   return targetUrl;
 }
 
-function focusFeishuEditorInActiveChrome(url, injectScript) {
+function focusFeishuEditorInActiveChrome(url, injectScript, options) {
+  const preferHiddenTextarea = Boolean(options && options.preferHiddenTextarea);
   return runConfiguredPageScriptInActiveChrome({
     url,
     injectScript,
     reload: false,
     pageScript: `
-      const editor = document.querySelector('[data-content-editable-root="true"], [contenteditable="true"], [role="textbox"]');
+      const preferHiddenTextarea = ${JSON.stringify(preferHiddenTextarea)};
+      const editableSelector = '[data-content-editable-root="true"], .editor-kit-container[contenteditable="true"], [contenteditable="true"], [role="textbox"]';
+      const hiddenTextareaSelector = 'textarea.docx-selection-hidden-textarea';
+      const visibleEditors = Array.from(document.querySelectorAll(editableSelector)).filter((el) => {
+        if (!el || el.nodeType !== 1) return false;
+        const rect = el.getBoundingClientRect();
+        return rect.width > 0 && rect.height > 0;
+      });
+      const editor = visibleEditors.find((el) => {
+        if (el.getAttribute('data-content-editable-root') === 'true') return false;
+        return !String(el.className || '').includes('root-block');
+      }) || visibleEditors[0] || null;
+      const hiddenTextarea = document.querySelector(hiddenTextareaSelector);
       const selectEditableText = (root) => {
         if (!root || !window.getSelection || !document.createRange) return false;
         const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
@@ -720,9 +811,14 @@ function focusFeishuEditorInActiveChrome(url, injectScript) {
         try { editor.click(); } catch (error) {}
         selectEditableText(editor);
       }
+      if (preferHiddenTextarea && hiddenTextarea && typeof hiddenTextarea.focus === 'function') {
+        hiddenTextarea.focus();
+        try { hiddenTextarea.click(); } catch (error) {}
+      }
       return {
         focused: !!editor,
         tagName: editor ? String(editor.tagName || '') : '',
+        pasteTargetTagName: hiddenTextarea ? String(hiddenTextarea.tagName || '') : '',
         activeTagName: document.activeElement ? String(document.activeElement.tagName || '') : '',
       };
     `,
@@ -865,6 +961,10 @@ function triggerSourceExtractionByShortcutInActiveChrome(options) {
     textLen: Number(extractionResult && extractionResult.textLen ? extractionResult.textLen : (validationSnapshot && validationSnapshot.textLength ? validationSnapshot.textLength : (pendingPaste && pendingPaste.textLen ? pendingPaste.textLen : 0))),
     htmlLen: Number(extractionResult && extractionResult.htmlLen ? extractionResult.htmlLen : (validationSnapshot && validationSnapshot.htmlLength ? validationSnapshot.htmlLength : (pendingPaste && pendingPaste.htmlLen ? pendingPaste.htmlLen : 0))),
     clipboardHtmlLen: Number(extractionResult && extractionResult.clipboardHtmlLen ? extractionResult.clipboardHtmlLen : (pendingPaste && pendingPaste.clipboardHtmlLen ? pendingPaste.clipboardHtmlLen : 0)),
+    hasDowngradedImages: Boolean(extractionResult && extractionResult.hasDowngradedImages),
+    hasImagesToInject: Boolean(extractionResult && extractionResult.hasImagesToInject),
+    imageInjectCount: Number(extractionResult && extractionResult.imageInjectCount ? extractionResult.imageInjectCount : 0),
+    orderedImageBase64List: extractionResult && extractionResult.orderedImageBase64List ? extractionResult.orderedImageBase64List : [],
     payloadError: extractionResult ? Boolean(extractionResult.payloadError) : false,
     extractionDebug,
     validationSnapshot,
@@ -883,6 +983,30 @@ function triggerTargetPasteByShortcutInActiveChrome(options) {
   // as triggerSourceExtractionByShortcutInActiveChrome uses Cmd+Shift+D.
   triggerShortcutInActiveChrome('p');
   return { triggered: 'Cmd+Shift+P' };
+}
+
+function waitForTargetSnapshotChangeInActiveChrome(baselineSnapshotSignature, options) {
+  const config = options || {};
+  const timeoutMs = Number(config.timeoutMs || 15000);
+  const intervalMs = Number(config.intervalMs || 400);
+  const description = config.description || 'native paste result to stabilize';
+
+  const snapshot = waitForActiveChromeJavaScriptValue(`(()=>{
+    document.dispatchEvent(new CustomEvent('feishu-capture-snapshot'));
+    const raw = document.documentElement.getAttribute('data-feishu-validation-snapshot');
+    if (!raw) return null;
+    try { return JSON.parse(raw); } catch (e) { return null; }
+  })()`, {
+    timeoutMs,
+    intervalMs,
+    description,
+    predicate(value) {
+      if (!value || value.__error) return false;
+      return buildSnapshotSignature(value) !== baselineSnapshotSignature;
+    },
+  });
+
+  return { snapshot };
 }
 
 function runNativePasteValidationInActiveChrome(options) {
@@ -950,30 +1074,213 @@ function runNativePasteValidationInActiveChrome(options) {
     ? extraction.validationSnapshot
     : captureValidationSnapshotViaDOM();
 
-  const targetBeforeSnapshot = captureValidationSnapshotViaDOM();
-
-  const targetPreparation = focusFeishuEditorInActiveChrome(targetUrl, injectScript);
-  const nativePaste = triggerTargetPasteByShortcutInActiveChrome({
-    url: targetUrl,
-    injectScript,
-  });
-  const baselineSnapshotSignature = JSON.stringify(targetBeforeSnapshot || null);
-  waitForActiveChromeJavaScriptValue(`(()=>{
-    document.dispatchEvent(new CustomEvent('feishu-capture-snapshot'));
-    const raw = document.documentElement.getAttribute('data-feishu-validation-snapshot');
-    if (!raw) return null;
-    try { return JSON.parse(raw); } catch (e) { return null; }
-  })()`, {
-    timeoutMs: 15000,
-    intervalMs: 400,
-    description: 'native paste result to stabilize',
-    predicate(value) {
-      if (!value || value.__error) return false;
-      return JSON.stringify(value) !== baselineSnapshotSignature;
+  const preferNativeClipboardPaste = shouldPreferNativeClipboardPasteForValidation(extraction);
+  const clipboardPreparation = prepareNativeClipboardForValidation(extraction, {
+    prepare() {
+      return preparePendingPasteForNativePasteInActiveChrome({
+        url: sourceUrl,
+        injectScript,
+      });
     },
   });
 
-  const targetSnapshot = captureValidationSnapshotViaDOM();
+  const targetPreparation = focusFeishuEditorInActiveChrome(targetUrl, injectScript, {
+    preferHiddenTextarea: false,
+  });
+
+  // ── Image Upload Step ──
+  // Upload images to the target document via Feishu's internal API
+  // (POST /space/api/box/stream/upload/all/ with mount_point=docx_image).
+  // The TM script handles obj_token resolution for wiki pages automatically.
+  let uploadedTokenMap = {};
+  if (preferNativeClipboardPaste && extraction && extraction.hasImagesToInject) {
+    console.log('[feishu-helper-profile-runner] Uploading images to target page...');
+    try {
+      // Clear previous upload result and dispatch the upload event.
+      // The TM script reads orderedImageBase64List from IndexedDB's pendingPaste
+      // (too large for DOM attributes), uploads via the internal API, and
+      // updates the pendingPaste docxRecord with valid tokens.
+      executeJavaScriptInActiveChromeTab(`
+        try {
+          document.documentElement.removeAttribute('data-feishu-upload-result');
+          document.dispatchEvent(new CustomEvent('feishu-upload-pending-images'));
+        } catch(e) {}
+      `);
+      // Wait for uploads to complete (2s per image, max 120s)
+      const imageCount = extraction.imageInjectCount || extraction.imageCount || 10;
+      const uploadTimeout = Math.min(imageCount * 2500 + 5000, 120000);
+      sleepMs(Math.min(5000, uploadTimeout));
+      // Check upload progress periodically
+      for (let progressCheck = 0; progressCheck < Math.ceil(uploadTimeout / 3000); progressCheck++) {
+        sleepMs(3000);
+        try {
+          const uploadResultRaw = executeJavaScriptInActiveChromeTab(
+            `document.documentElement.getAttribute('data-feishu-upload-result') || ''`
+          );
+          if (uploadResultRaw) {
+            const uploadResult = JSON.parse(uploadResultRaw);
+            if (uploadResult.tokenMap) {
+              uploadedTokenMap = uploadResult.tokenMap;
+              console.log('[feishu-helper-profile-runner] upload-result:', uploadResult.count, 'tokens obtained');
+              break;
+            }
+            if (uploadResult.error) {
+              console.log('[feishu-helper-profile-runner] upload-error:', uploadResult.error);
+              break;
+            }
+          }
+        } catch (e) {}
+      }
+
+      // If we got tokens, set them in the TM script for token replacement
+      if (Object.keys(uploadedTokenMap).length > 0) {
+        console.log('[feishu-helper-profile-runner] Setting token map in TM script...');
+        try {
+          const tokenMapJson = JSON.stringify(uploadedTokenMap);
+          executeJavaScriptInActiveChromeTab(`
+            try {
+              document.documentElement.removeAttribute('data-feishu-token-map-set');
+              document.dispatchEvent(new CustomEvent('feishu-set-token-map', {
+                detail: { tokenMap: ${tokenMapJson} }
+              }));
+            } catch(e) {}
+          `);
+          sleepMs(500);
+          const tokenMapResult = executeJavaScriptInActiveChromeTab(
+            `document.documentElement.getAttribute('data-feishu-token-map-set') || ''`
+          );
+          console.log('[feishu-helper-profile-runner] token-map-set-result:', tokenMapResult);
+        } catch (e) {
+          console.log('[feishu-helper-profile-runner] token-map-set-failed:', String(e));
+        }
+      }
+    } catch (e) {
+      console.log('[feishu-helper-profile-runner] image-upload-failed:', String(e));
+    }
+  }
+
+  const targetBeforeSnapshot = captureValidationSnapshotViaDOM();
+  const baselineSnapshotSignature = buildSnapshotSignature(targetBeforeSnapshot);
+  const nativePaste = preferNativeClipboardPaste
+    ? (function () {
+        // Downgraded images flow: Cmd+Shift+P writes clipboard, then Cmd+V pastes it.
+        // Step 1: trigger Cmd+Shift+P to prepare clipboard payload
+        triggerTargetPasteByShortcutInActiveChrome({
+          url: targetUrl,
+          injectScript,
+        });
+        // Step 2: wait briefly for the TM script to finish writing to clipboard
+        try {
+          waitForActiveChromeJavaScriptValue(
+            `document.documentElement.getAttribute('data-feishu-clipboard-write') || 'waiting'`,
+            {
+              timeoutMs: 8000,
+              intervalMs: 300,
+              description: 'TM script clipboard write to complete',
+              predicate(value) {
+                return value === 'ok' || value === 'written';
+              },
+            }
+          );
+        } catch (e) {
+          // Clipboard write might have already completed or timed out; continue anyway
+        }
+        // Step 3: trigger Cmd+V to actually paste the clipboard content
+        focusFeishuEditorInActiveChrome(targetUrl, injectScript, { preferHiddenTextarea: false });
+        return runPasteAttemptWithFallback({
+          baselineSignature: baselineSnapshotSignature,
+          runPrimary() {
+            return triggerNativePasteInActiveChrome();
+          },
+          waitForPrimary() {
+            return waitForTargetSnapshotChangeInActiveChrome(baselineSnapshotSignature, {
+              timeoutMs: 20000,
+              intervalMs: 500,
+              description: 'Cmd+V after Cmd+Shift+P paste result to stabilize',
+            });
+          },
+          runFallback() {
+            focusFeishuEditorInActiveChrome(targetUrl, injectScript, { preferHiddenTextarea: false });
+            return triggerNativePasteInActiveChrome();
+          },
+          waitForFallback() {
+            return waitForTargetSnapshotChangeInActiveChrome(baselineSnapshotSignature, {
+              timeoutMs: 15000,
+              intervalMs: 400,
+              description: 'Cmd+V retry paste result to stabilize',
+            });
+          },
+        });
+      })()
+    : runPasteAttemptWithFallback({
+      baselineSignature: baselineSnapshotSignature,
+      runPrimary() {
+        return triggerTargetPasteByShortcutInActiveChrome({
+          url: targetUrl,
+          injectScript,
+        });
+      },
+      waitForPrimary() {
+        return waitForTargetSnapshotChangeInActiveChrome(baselineSnapshotSignature, {
+          timeoutMs: 5000,
+          intervalMs: 350,
+          description: 'Cmd+Shift+P paste result to stabilize',
+        });
+      },
+      runFallback() {
+        focusFeishuEditorInActiveChrome(targetUrl, injectScript);
+        return triggerNativePasteInActiveChrome();
+      },
+      waitForFallback() {
+        return waitForTargetSnapshotChangeInActiveChrome(baselineSnapshotSignature, {
+          timeoutMs: 15000,
+          intervalMs: 400,
+          description: 'Cmd+V fallback paste result to stabilize',
+        });
+      },
+    });
+
+  // After native paste, trigger base64 image injection if images were stored
+  if (preferNativeClipboardPaste && extraction && (extraction.hasDowngradedImages || extraction.hasImagesToInject)) {
+    // Wait for Feishu to finish creating image blocks, then trigger injection
+    try {
+      waitForActiveChromeJavaScriptValue(
+        `(() => { try { return String(document.querySelectorAll('[data-content-editable-root="true"] [data-block-type="image"]').length); } catch(e) { return '0'; } })()`,
+        {
+          timeoutMs: 10000,
+          intervalMs: 500,
+          description: 'image blocks to appear in editor after paste',
+          predicate(value) { return Number(value) > 0; },
+        }
+      );
+    } catch (e) {
+      // Image blocks might not have been created yet; continue anyway
+    }
+    // Trigger injection via DOM event (accessible from Chrome isolated world)
+    try {
+      executeJavaScriptInActiveChromeTab(`
+        try {
+          document.dispatchEvent(new CustomEvent('feishu-inject-images'));
+        } catch(e) {}
+      `);
+    } catch (e) {
+      // Injection might fail; continue with validation
+    }
+    // Wait for injection result and images to render
+    sleepMs(2500);
+    try {
+      const injectResult = executeJavaScriptInActiveChromeTab(
+        `document.documentElement.getAttribute('data-feishu-image-inject-result') || ''`
+      );
+      console.log('[feishu-helper-profile-runner] image-injection-result:', injectResult);
+    } catch (e) {}
+  }
+
+  const targetSnapshot = nativePaste && nativePaste.finalSnapshot
+    ? nativePaste.finalSnapshot
+    : captureValidationSnapshotViaDOM();
+
+  const cleanup = { attempted: false, skipped: true };
 
   const diff = compareValidationSnapshots(sourceSnapshot, targetSnapshot);
   return {
@@ -981,10 +1288,13 @@ function runNativePasteValidationInActiveChrome(options) {
     targetUrl,
     extraction,
     sourceImageConversion,
+    clipboardPreparation,
     targetPreparation,
+    preferNativeClipboardPaste,
     nativePaste,
     sourceSnapshot,
     targetSnapshot,
+    cleanup,
     diff,
   };
 }
@@ -1681,12 +1991,18 @@ module.exports = {
   runNativePasteValidationInActiveChrome,
   runTampermonkeyAutomationActionInActiveChrome,
   runTampermonkeyRealTestInActiveChrome,
+  runPostValidationCleanup,
   triggerNativePasteInActiveChrome,
+  preparePendingPasteForNativePasteInActiveChrome,
+  triggerPostValidationCleanupInActiveChrome,
+  waitForTargetSnapshotChangeInActiveChrome,
   launchInjectedPersistentContext,
   probeInjectedScript,
   restoreChromeProfileCookies,
   assertProbeLoaded,
   compareValidationSnapshots,
+  prepareNativeClipboardForValidation,
+  shouldPreferNativeClipboardPasteForValidation,
   waitForSourceImageConversionInActiveChrome,
   parseCliArgs,
   resolveAutomationAction,

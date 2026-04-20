@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         飞书文档助手
 // @namespace    https://github.com/tampermonkey-scripts
-// @version      4.2.17
+// @version      4.2.18
 // @description  飞书文档完整复制、图片提取、文档副本（含LaTeX公式）
 // @author       You
 // @match        https://*.feishu.cn/*
@@ -23,10 +23,11 @@
   }
 
   var SCRIPT_NAME = '飞书文档助手';
-  var SCRIPT_VERSION = '4.2.17';
+  var SCRIPT_VERSION = '4.2.18';
   var AUTOMATION_REQUEST_EVENT = 'feishu-helper:automation-request';
   var AUTOMATION_RESULT_EVENT = 'feishu-helper:automation-result';
   var CONTENT_ROOT_SELECTOR = '[data-content-editable-root="true"]';
+  var HIDDEN_PASTE_TEXTAREA_SELECTOR = 'textarea.docx-selection-hidden-textarea';
   var EDITABLE_SELECTOR = [
     CONTENT_ROOT_SELECTOR,
     '.editor-kit-container[contenteditable="true"]',
@@ -74,6 +75,116 @@
     },
   };
   console.info('[Feishu Helper v' + SCRIPT_VERSION + '] loaded on', location.href);
+
+  // ── Fetch interceptor for discovering Feishu's internal upload API ──
+  // Always active — captures every upload/media POST so we can discover the
+  // correct mount_point, headers, and body format that Feishu itself uses.
+  var _feishuCapturedUploads = [];
+  var _originalFetch = window.fetch;
+  function _parseUrlQueryParams(url) {
+    var params = {};
+    try {
+      var qs = url.split('?')[1] || '';
+      qs.split('&').forEach(function (pair) {
+        var kv = pair.split('=');
+        if (kv[0]) params[decodeURIComponent(kv[0])] = decodeURIComponent(kv.slice(1).join('='));
+      });
+    } catch (e) {}
+    return params;
+  }
+  window.fetch = function (input, init) {
+    var url = typeof input === 'string' ? input : (input instanceof Request ? input.url : String(input || ''));
+    var method = (init && init.method) || (input instanceof Request ? input.method : 'GET');
+    if (/upload|media|image|pre_upload|box\/stream|box\/image|put\//i.test(url) && /post|put/i.test(method || 'GET')) {
+      var captured = {
+        url: url,
+        method: method,
+        timestamp: Date.now(),
+        headers: {},
+        bodyType: init && init.body ? (typeof init.body === 'string' ? 'string' : (init.body instanceof FormData ? 'FormData' : (init.body instanceof Blob ? 'Blob' : typeof init.body))) : 'none',
+        queryParams: _parseUrlQueryParams(url),
+      };
+      // Capture headers if possible
+      if (init && init.headers) {
+        try {
+          if (init.headers instanceof Headers) {
+            init.headers.forEach(function (v, k) { captured.headers[k] = v; });
+          } else if (typeof init.headers === 'object') {
+            Object.keys(init.headers).forEach(function (k) { captured.headers[k] = init.headers[k]; });
+          }
+        } catch (e) {}
+      }
+      // For FormData body, capture field names and file entry details
+      if (init && init.body instanceof FormData) {
+        captured.formDataFields = [];
+        try {
+          init.body.forEach(function (val, key) {
+            var entry = { key: key };
+            if (val instanceof File || val instanceof Blob) {
+              entry.type = val instanceof File ? 'File' : 'Blob';
+              if (val instanceof File) entry.fileName = val.name;
+            } else {
+              entry.type = 'string';
+              entry.value = String(val).substring(0, 200);
+            }
+            captured.formDataFields.push(entry);
+          });
+        } catch (e) {}
+      }
+      _feishuCapturedUploads.push(captured);
+      console.info('[Feishu Helper] Captured upload request:', url, captured.queryParams);
+      try { document.documentElement.setAttribute('data-feishu-captured-uploads', JSON.stringify(_feishuCapturedUploads.slice(-10))); } catch (e) {}
+    }
+    return _originalFetch.apply(this, arguments);
+  };
+  registerRuntimeDisposer(function () { window.fetch = _originalFetch; });
+
+  // ── XHR interceptor for upload API discovery (always active) ──
+  var _originalXHROpen = XMLHttpRequest.prototype.open;
+  var _originalXHRSend = XMLHttpRequest.prototype.send;
+  XMLHttpRequest.prototype.open = function (method, url) {
+    this._feishuInterceptorInfo = { method: method, url: String(url || '') };
+    return _originalXHROpen.apply(this, arguments);
+  };
+  XMLHttpRequest.prototype.send = function (body) {
+    if (this._feishuInterceptorInfo) {
+      var info = this._feishuInterceptorInfo;
+      if (/upload|media|image|pre_upload|box\/stream|box\/image|put\//i.test(info.url)) {
+        var captured = {
+          url: info.url,
+          method: info.method,
+          timestamp: Date.now(),
+          bodyType: body ? (typeof body === 'string' ? 'string' : (body instanceof FormData ? 'FormData' : (body instanceof Blob ? 'Blob' : typeof body))) : 'none',
+          queryParams: _parseUrlQueryParams(info.url),
+          xhr: true,
+        };
+        if (body instanceof FormData) {
+          captured.formDataFields = [];
+          try {
+            body.forEach(function (val, key) {
+              var entry = { key: key };
+              if (val instanceof File || val instanceof Blob) {
+                entry.type = val instanceof File ? 'File' : 'Blob';
+                if (val instanceof File) entry.fileName = val.name;
+              } else {
+                entry.type = 'string';
+                entry.value = String(val).substring(0, 200);
+              }
+              captured.formDataFields.push(entry);
+            });
+          } catch (e) {}
+        }
+        _feishuCapturedUploads.push(captured);
+        console.info('[Feishu Helper] Captured XHR upload request:', info.url, captured.queryParams);
+        try { document.documentElement.setAttribute('data-feishu-captured-uploads', JSON.stringify(_feishuCapturedUploads.slice(-10))); } catch (e) {}
+      }
+    }
+    return _originalXHRSend.apply(this, arguments);
+  };
+  registerRuntimeDisposer(function () {
+    XMLHttpRequest.prototype.open = _originalXHROpen;
+    XMLHttpRequest.prototype.send = _originalXHRSend;
+  });
 
   function getContentRootElement() {
     return document.querySelector(CONTENT_ROOT_SELECTOR);
@@ -381,6 +492,16 @@
 
   function safeGetOwnKeys(obj) {
     try {
+      if (typeof Map !== 'undefined' && obj instanceof Map) {
+        return Array.from(obj.keys()).slice(0, 120).map(function (key) {
+          return String(key);
+        }).sort();
+      }
+      if (typeof Set !== 'undefined' && obj instanceof Set) {
+        return Array.from(obj.values()).slice(0, 120).map(function (value) {
+          return String(value);
+        }).sort();
+      }
       return Object.getOwnPropertyNames(obj || {}).sort();
     } catch (err) {
       return [];
@@ -389,6 +510,27 @@
 
   function safeReadProperty(obj, key) {
     try {
+      if (typeof Map !== 'undefined' && obj instanceof Map) {
+        if (obj.has(key)) {
+          return { ok: true, value: obj.get(key) };
+        }
+        var wantedKey = String(key);
+        var matchedValue;
+        var foundMatch = false;
+        obj.forEach(function (value, mapKey) {
+          if (foundMatch) return;
+          if (String(mapKey) === wantedKey) {
+            matchedValue = value;
+            foundMatch = true;
+          }
+        });
+        return { ok: true, value: foundMatch ? matchedValue : undefined };
+      }
+      if (typeof Set !== 'undefined' && obj instanceof Set) {
+        var index = Number(key);
+        if (!isFinite(index) || index < 0) return { ok: true, value: undefined };
+        return { ok: true, value: Array.from(obj.values())[index] };
+      }
       return { ok: true, value: obj[key] };
     } catch (err) {
       return { ok: false, error: err };
@@ -1203,6 +1345,7 @@
       'data-block-type': true,
       'data-block-id': true,
       'data-record-id': true,
+      'data-feishu-downgraded-images': true,
       'data-emoji-id': true,
       'data-lark-record-data': true,
       'data-lark-record-format': true,
@@ -1831,12 +1974,17 @@
     return sanitizeHtmlFragment(normalizeListHtmlFragment((html || '').trim()));
   }
 
-  function buildClipboardHtml(bodyHtml, docxRecord) {
+  function buildClipboardHtml(bodyHtml, docxRecord, hasDowngradedImages) {
     var fragment = finalizeHtmlFragment(bodyHtml);
-    // Use "true" so Feishu uses docx/record for structured blocks (callout colors).
-    // Image blocks are removed from recordMap (cross-document tokens invalid),
-    // so Feishu should fallback to HTML body for images (base64 data URLs).
-    var rootAttr = ' data-page-id="" data-lark-html-role="root" data-docx-has-block-data="true"';
+    // When images have been downgraded to base64, the docx/record no longer
+    // contains image blocks.  Feishu's paste handler prioritises docx/record
+    // over HTML, so if we keep data-docx-has-block-data="true" AND include
+    // docx/record on the clipboard, the images in the HTML body are silently
+    // dropped.  Setting the flag to "false" (and omitting docx/record from the
+    // clipboard) forces Feishu to walk the HTML paste path, which can convert
+    // base64 <img> tags into image blocks via the text/html format handler.
+    var blockDataFlag = (hasDowngradedImages ? 'false' : 'true');
+    var rootAttr = ' data-page-id="" data-lark-html-role="root" data-docx-has-block-data="' + blockDataFlag + '"';
     return '<meta charset="utf-8"><div' + rootAttr + '>' + fragment + '</div>';
   }
 
@@ -2412,6 +2560,10 @@
     });
   }
 
+  // ── Token replacement map for uploaded images ──
+  // Set by the runner after successfully uploading images to the target document.
+  var _uploadedTokenMap = {};
+
   function getPendingPaste() {
     return openDB().then(function (db) {
       return new Promise(function (resolve) {
@@ -2475,10 +2627,20 @@
       .catch(function () { return null; });
   }
 
+  // Tiny 1x1 transparent PNG placeholder for clipboard HTML.
+  // We keep the clipboard HTML small so Feishu's paste handler can process it,
+  // and store the actual base64 data separately in IndexedDB for post-paste injection.
+  var IMAGE_PLACEHOLDER_SRC = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==';
+
   function convertImagesToBase64(html) {
     var imgUrls = [];
     var tokenToBase64 = {}; // token → base64 mapping for recordMap patching
-    var urlRegex = /src="(https?:\/\/[^"]+\/space\/api\/box\/stream\/download\/preview\/([^/?"]+)[^"]*)"/g;
+    // Match various Feishu image URL formats:
+    // 1. /space/api/box/stream/download/preview/TOKEN
+    // 2. /space/api/box/stream/download/v2/cover/TOKEN
+    // 3. /space/api/box/stream/download/all/?token=TOKEN
+    // 4. CDN URLs: feishucdn.com/static-resource/v1/TOKEN~?...
+    var urlRegex = /src="(https?:\/\/[^"]+?(?:\/space\/api\/box\/stream\/download\/(?:preview\/|v2\/cover\/|all\/)|(?:feishucdn\.com\/static-resource\/v1\/))([A-Za-z0-9_.~-]+)[^"]*)"/g;
     var match;
     while ((match = urlRegex.exec(html)) !== null) {
       imgUrls.push({ url: match[1], full: match[0], token: match[2] });
@@ -2517,7 +2679,10 @@
           });
           showToast('📷 转换图片中 ' + done + '/' + total);
           if (base64) {
-            html = html.replace(item.full, 'src="' + base64 + '"');
+            // Store the full base64 data for post-paste injection,
+            // but replace the HTML src with a tiny placeholder to keep
+            // the clipboard payload small.
+            html = html.replace(item.full, 'src="' + IMAGE_PLACEHOLDER_SRC + '"');
             if (item.token) tokenToBase64[item.token] = base64;
           }
         });
@@ -2551,6 +2716,168 @@
       });
       throw error;
     });
+  }
+
+  function pruneRemovedRecordIds(value, removedIds) {
+    if (!value || !removedIds || removedIds.size === 0) return value;
+    if (Array.isArray(value)) {
+      var next = [];
+      value.forEach(function (item) {
+        if (typeof item === 'string' && removedIds.has(item)) return;
+        if (item && typeof item === 'object' && typeof item.recordId === 'string' && removedIds.has(item.recordId)) return;
+        next.push(pruneRemovedRecordIds(item, removedIds));
+      });
+      return next;
+    }
+    if (typeof value !== 'object') return value;
+    Object.keys(value).forEach(function (key) {
+      value[key] = pruneRemovedRecordIds(value[key], removedIds);
+    });
+    return value;
+  }
+
+  // Remove image blocks from a docxRecord so that the docxRecord paste path
+  // creates all non-image blocks with full structure (grid, table, callout etc.)
+  // while skipping the image blocks (which have invalid tokens in the target).
+  // We inject base64 images into the editor after the paste.
+  function removeImageBlocksFromDocxRecord(docxRecordObj) {
+    if (!docxRecordObj) return docxRecordObj;
+    var recordMap = docxRecordObj.recordMap || {};
+    var removedIds = new Set();
+
+    // First pass: find all image block recordIds
+    Object.keys(recordMap).forEach(function (recordId) {
+      var record = recordMap[recordId];
+      if (record && record.snapshot && record.snapshot.type === 'image') {
+        removedIds.add(recordId);
+      }
+    });
+
+    if (removedIds.size === 0) return docxRecordObj;
+
+    // Deep clone to avoid mutating the original
+    var clone = JSON.parse(JSON.stringify(docxRecordObj));
+    var cleanMap = clone.recordMap || {};
+
+    // Remove image records from recordMap
+    removedIds.forEach(function (id) {
+      delete cleanMap[id];
+    });
+
+    // Remove image recordIds from recordIds, blockIds, selection
+    if (clone.recordIds) {
+      clone.recordIds = clone.recordIds.filter(function (id) { return !removedIds.has(id); });
+    }
+    if (clone.blockIds) {
+      var newBlockIds = [];
+      clone.recordIds.forEach(function (_, i) { newBlockIds.push(i + 1); });
+      clone.blockIds = newBlockIds;
+    }
+    if (clone.selection) {
+      clone.selection = clone.selection.filter(function (s) { return !removedIds.has(s.recordId); });
+    }
+
+    // Remove image children from parent snapshots
+    Object.keys(cleanMap).forEach(function (recordId) {
+      var record = cleanMap[recordId];
+      if (record && record.snapshot && record.snapshot.children) {
+        record.snapshot.children = record.snapshot.children.filter(function (childId) {
+          return !removedIds.has(childId);
+        });
+      }
+    });
+
+    // Also clean payloadMap if present
+    if (clone.payloadMap) {
+      removedIds.forEach(function (id) { delete clone.payloadMap[id]; });
+    }
+
+    return clone;
+  }
+
+  function stripStructuredImageAttrsFromHtml(html) {
+    if (!html || typeof html !== 'string') return html || '';
+    return html.replace(/<figure\b([^>]*)>([\s\S]*?<img\b[^>]*src="data:image\/[^"]+"[^>]*>[\s\S]*?)<\/figure>/gi, function (full, attrs, inner) {
+      var cleanedAttrs = String(attrs || '')
+        .replace(/\sdata-block-type="[^"]*"/gi, '')
+        .replace(/\sdata-block-id="[^"]*"/gi, '')
+        .replace(/\sdata-record-id="[^"]*"/gi, '')
+        .replace(/\sdata-lark-record-data="[^"]*"/gi, '')
+        .replace(/\sdata-meta-block-props="[^"]*"/gi, '')
+        .replace(/\s{2,}/g, ' ')
+        .trim();
+      cleanedAttrs = (cleanedAttrs ? cleanedAttrs + ' ' : '') + 'data-feishu-downgraded-images="true"';
+      return '<figure ' + cleanedAttrs.trim() + '>' + inner + '</figure>';
+    });
+  }
+
+  function downgradeStructuredImagesForPaste(docxRecordObj, html) {
+    if (!docxRecordObj || !docxRecordObj.recordMap || typeof docxRecordObj.recordMap !== 'object') {
+      return {
+        docxRecord: docxRecordObj,
+        html: html || '',
+        removedImageRecordIds: [],
+      };
+    }
+
+    var imageRecordIds = Object.keys(docxRecordObj.recordMap).filter(function (recordId) {
+      var record = docxRecordObj.recordMap[recordId];
+      return !!(record && record.snapshot && record.snapshot.type === 'image');
+    });
+
+    if (!imageRecordIds.length) {
+      return {
+        docxRecord: docxRecordObj,
+        html: html || '',
+        removedImageRecordIds: [],
+      };
+    }
+
+    var removedIds = new Set(imageRecordIds);
+
+    if (Array.isArray(docxRecordObj.recordIds)) {
+      var paired = docxRecordObj.recordIds.map(function (recordId, index) {
+        return {
+          recordId: recordId,
+          blockId: Array.isArray(docxRecordObj.blockIds) ? docxRecordObj.blockIds[index] : undefined,
+        };
+      });
+      var kept = paired.filter(function (entry) {
+        return !removedIds.has(entry.recordId);
+      });
+      docxRecordObj.recordIds = kept.map(function (entry) { return entry.recordId; });
+      if (Array.isArray(docxRecordObj.blockIds)) {
+        docxRecordObj.blockIds = kept.map(function (entry) { return entry.blockId; });
+      }
+    }
+
+    if (Array.isArray(docxRecordObj.selection)) {
+      docxRecordObj.selection = docxRecordObj.selection.filter(function (entry) {
+        return !(entry && removedIds.has(entry.recordId));
+      });
+    }
+
+    if (docxRecordObj.payloadMap && typeof docxRecordObj.payloadMap === 'object') {
+      imageRecordIds.forEach(function (recordId) {
+        delete docxRecordObj.payloadMap[recordId];
+      });
+    }
+
+    Object.keys(docxRecordObj.recordMap).forEach(function (recordId) {
+      var record = docxRecordObj.recordMap[recordId];
+      if (!record || !record.snapshot) return;
+      record.snapshot = pruneRemovedRecordIds(record.snapshot, removedIds);
+    });
+
+    imageRecordIds.forEach(function (recordId) {
+      delete docxRecordObj.recordMap[recordId];
+    });
+
+    return {
+      docxRecord: docxRecordObj,
+      html: stripStructuredImageAttrsFromHtml(html || ''),
+      removedImageRecordIds: imageRecordIds,
+    };
   }
 
   function buildExportHtml(title, bodyHtml) {
@@ -2636,16 +2963,31 @@
 
         var docTitle = getDocumentTitle();
         buildClipboardPayload(content).then(function (payload) {
+          var hasDowngradedImages = !!(payload && payload.hasDowngradedImages) || /data-feishu-downgraded-images="true"/i.test(String(payload && payload.html || ''));
+          var hasImagesToInject = !!(payload && payload.hasImagesToInject);
+          var orderedImageBase64List = (payload && payload.orderedImageBase64List) || [];
+          // Use the docxRecord from the payload (which has image blocks removed
+          // when images need injection).  Don't fall back to content.docxRecord
+          // which would include the invalid image tokens.
+          var effectiveDocxRecord = (payload && payload.docxRecord) || '';
           return setPendingPaste({
             html: content.html,
             text: content.text,
             clipboardHtml: payload.html,
-            docxRecord: payload.docxRecord || content.docxRecord || '',
+            docxRecord: effectiveDocxRecord,
             title: docTitle,
+            hasDowngradedImages: hasDowngradedImages,
+            hasImagesToInject: hasImagesToInject,
+            hasImagesToUpload: !!(payload && payload.hasImagesToUpload),
+            orderedImageBase64List: orderedImageBase64List,
+            originalDocxRecordObj: payload && payload.originalDocxRecordObj ? payload.originalDocxRecordObj : null,
           }).then(function () {
             var imgCount = countExtractedImages(content);
             var inlinedImgCount = (payload.html.match(/data:image/g) || []).length;
-            showToast('✅ 已提取 ' + content.blockCount + ' 块 · ' + content.equationCount + ' 公式 · ' + imgCount + ' 图片 · 已缓存 ' + inlinedImgCount + ' 张', 3200);
+            var injectCount = orderedImageBase64List.length;
+            var toastMsg = '✅ 已提取 ' + content.blockCount + ' 块 · ' + content.equationCount + ' 公式 · ' + imgCount + ' 图片';
+            if (injectCount > 0) toastMsg += ' · ' + injectCount + ' 张待注入';
+            showToast(toastMsg, 3200);
             var result = {
               title: docTitle,
               blockCount: Number(content.blockCount || 0),
@@ -2655,6 +2997,9 @@
               textLen: String(content.text || '').length,
               htmlLen: String(content.html || '').length,
               clipboardHtmlLen: String(payload.html || '').length,
+              hasDowngradedImages: hasDowngradedImages,
+              hasImagesToInject: hasImagesToInject,
+              imageInjectCount: orderedImageBase64List.length,
               extractionDebug: content.extractionDebug || getLastExtractionDebug(),
             };
             // Sync extraction result to DOM for cross-context visibility.
@@ -2669,6 +3014,9 @@
                 textLen: result.textLen,
                 htmlLen: result.htmlLen,
                 clipboardHtmlLen: result.clipboardHtmlLen,
+                hasDowngradedImages: result.hasDowngradedImages,
+                hasImagesToInject: result.hasImagesToInject,
+                imageInjectCount: result.imageInjectCount,
                 payloadError: false,
                 ts: Date.now(),
               }));
@@ -2750,6 +3098,7 @@
         textLen: String(pending.text || '').length,
         htmlLen: String(pending.html || '').length,
         clipboardHtmlLen: String(pending.clipboardHtml || '').length,
+        hasDowngradedImages: Boolean(pending.hasDowngradedImages),
         ts: Number(pending.ts || 0),
       };
     });
@@ -2855,6 +3204,50 @@
       }
 
       return resolvePastePayload(pendingPaste).then(function (payload) {
+        // If we have uploaded tokens, replace invalid tokens in docxRecord
+        // to get a complete docxRecord with valid image tokens.
+        var tokenMapKeys = Object.keys(_uploadedTokenMap);
+        var hasImageBlocks = false;
+        var origRecord = payload.originalDocxRecordObj;
+        if (origRecord && origRecord.recordMap) {
+          hasImageBlocks = Object.keys(origRecord.recordMap).some(function (recordId) {
+            var rec = origRecord.recordMap[recordId];
+            return rec && rec.snapshot && rec.snapshot.type === 'image';
+          });
+        }
+
+        if (tokenMapKeys.length > 0 && origRecord) {
+          var replacedRecord = replaceTokensInDocxRecord(origRecord, _uploadedTokenMap);
+          var replacedCount = 0;
+          var origRecordMap = origRecord.recordMap || {};
+          Object.keys(origRecordMap).forEach(function (recordId) {
+            var record = origRecordMap[recordId];
+            if (record && record.snapshot && record.snapshot.type === 'image' && record.snapshot.image) {
+              var oldToken = record.snapshot.image.token || '';
+              if (oldToken && _uploadedTokenMap[oldToken]) replacedCount++;
+            }
+          });
+          if (replacedCount > 0) {
+            payload.docxRecord = JSON.stringify(replacedRecord);
+            payload.hasDowngradedImages = false;
+            payload.hasImagesToInject = false;
+            payload.orderedImageBase64List = [];
+            document.documentElement.setAttribute('data-feishu-debug',
+              'tokenReplace-' + replacedCount + '-of-' + tokenMapKeys.length);
+          } else if (hasImageBlocks) {
+            // Upload succeeded but no tokens matched — fallback to removing image blocks
+            payload.docxRecord = JSON.stringify(removeImageBlocksFromDocxRecord(origRecord));
+            document.documentElement.setAttribute('data-feishu-debug',
+              'tokenReplace-none-matched-fallback-remove');
+          }
+        } else if (hasImageBlocks && origRecord) {
+          // No uploaded tokens available — remove image blocks from docxRecord
+          // to avoid Feishu skipping the entire paste due to invalid image tokens
+          payload.docxRecord = JSON.stringify(removeImageBlocksFromDocxRecord(origRecord));
+          document.documentElement.setAttribute('data-feishu-debug',
+            'no-tokens-fallback-remove-images');
+        }
+
         return writeClipboardPayload(payload).then(function () {
           return {
             title: String(pendingPaste.title || ''),
@@ -2919,6 +3312,16 @@
     return el.matches(EDITABLE_SELECTOR);
   }
 
+  function isHiddenPasteTextarea(el) {
+    return !!(el && el.nodeType === 1 && el.matches(HIDDEN_PASTE_TEXTAREA_SELECTOR));
+  }
+
+  function isContentRootEditable(el) {
+    if (!el || el.nodeType !== 1) return false;
+    if (el.getAttribute('data-content-editable-root') === 'true') return true;
+    return /(^|\s)root-block(\s|$)/.test(String(el.className || ''));
+  }
+
   function closestEditableElement(node) {
     var el = node && node.nodeType === 1 ? node : node && node.parentElement;
     while (el) {
@@ -2934,7 +3337,43 @@
     return rect.width > 0 && rect.height > 0;
   }
 
-  function getEditableCandidates() {
+  function getEditableCandidateScore(el, options) {
+    if (!el) return -Infinity;
+    var config = options || {};
+    var purpose = config.purpose || 'insert';
+    var score = 0;
+    var selection = window.getSelection && window.getSelection();
+    var className = String(el.className || '');
+
+    if (isHiddenPasteTextarea(el)) {
+      score += purpose === 'paste' ? 1000 : -1000;
+      if (el === document.activeElement) score += 300;
+      return score;
+    }
+
+    if (isContentRootEditable(el)) score += 100;
+    else score += 300;
+
+    if (/zone-container|editor-kit-container|text-editor/.test(className)) score += 80;
+    if (el === document.activeElement) score += 240;
+
+    if (selection) {
+      var anchorNode = selection.anchorNode;
+      var focusNode = selection.focusNode;
+      if ((anchorNode && el.contains(anchorNode)) || (focusNode && el.contains(focusNode))) {
+        score += 160;
+      }
+    }
+
+    var rect = el.getBoundingClientRect();
+    score += Math.min(Math.round(rect.height), 120);
+    if (rect.top >= 0) score += 40;
+    return score;
+  }
+
+  function getEditableCandidates(options) {
+    var config = options || {};
+    var includeHiddenTextarea = !!config.includeHiddenTextarea;
     var seen = new Set();
     var result = [];
 
@@ -2944,6 +3383,9 @@
       result.push(el);
     }
 
+    if (includeHiddenTextarea && isHiddenPasteTextarea(document.activeElement)) {
+      push(document.activeElement);
+    }
     push(closestEditableElement(document.activeElement));
 
     var selection = window.getSelection && window.getSelection();
@@ -2952,17 +3394,39 @@
       push(closestEditableElement(selection.focusNode));
     }
 
+    if (includeHiddenTextarea) {
+      document.querySelectorAll(HIDDEN_PASTE_TEXTAREA_SELECTOR).forEach(function (el) {
+        push(el);
+      });
+    }
+
     document.querySelectorAll(
       EDITABLE_SELECTOR
     ).forEach(function (el) {
       push(el);
     });
 
-    return result.filter(isVisibleElement);
+    return result.filter(function (el) {
+      if (isHiddenPasteTextarea(el)) return includeHiddenTextarea;
+      return isVisibleElement(el);
+    }).sort(function (left, right) {
+      return getEditableCandidateScore(right, config) - getEditableCandidateScore(left, config);
+    });
   }
 
   function getActiveBodyEditor() {
-    var candidates = getEditableCandidates();
+    var candidates = getEditableCandidates({
+      purpose: 'insert',
+      includeHiddenTextarea: false,
+    });
+    return candidates.length ? candidates[0] : null;
+  }
+
+  function getActivePasteDispatchTarget() {
+    var candidates = getEditableCandidates({
+      purpose: 'paste',
+      includeHiddenTextarea: true,
+    });
     return candidates.length ? candidates[0] : null;
   }
 
@@ -2994,19 +3458,94 @@
     return convertImagesToBase64(html).then(function (result) {
       var htmlWithImages = result.html || result;
       var tokenToBase64 = result.tokenToBase64 || {};
+      var tokenCount = Object.keys(tokenToBase64).length;
 
-      document.documentElement.setAttribute('data-feishu-debug', 'convertImages-base64keys-' + Object.keys(tokenToBase64).length);
+      document.documentElement.setAttribute('data-feishu-debug', 'convertImages-base64keys-' + tokenCount);
 
-      // Keep image blocks in recordMap with their original tokens.
-      // Feishu's native copy uses the same token format and images work
-      // cross-document. Previous failures were likely due to incorrect
-      // recordMap structure (wrong blockIds/recordIds), not the tokens.
-      document.documentElement.setAttribute('data-feishu-debug', 'recordMap-kept-images-count-' + Object.keys(docxRecordObj.recordMap).length);
+      // Build ordered image base64 list from docxRecord by walking the
+      // block tree in document order.  Image blocks nested inside grid_column,
+      // callout, table_cell etc. are NOT in recordIds (only direct children
+      // of the page are).  We must walk the tree recursively.
+      var orderedImageBase64List = [];
+      if (docxRecordObj && tokenCount > 0) {
+        var recordMap = docxRecordObj.recordMap || {};
+        var imageBlocksFound = 0;
+        var tokensMatched = 0;
+        var tokenKeys = Object.keys(tokenToBase64);
+
+        // Recursively walk the block tree in document order
+        function collectImageRecords(snapshot) {
+          if (!snapshot) return;
+          if (snapshot.type === 'image' && snapshot.image) {
+            imageBlocksFound++;
+            var token = snapshot.image.token || '';
+            var base64 = tokenToBase64[token] || '';
+            if (base64) tokensMatched++;
+            orderedImageBase64List.push({
+              token: token,
+              base64: base64,
+              width: snapshot.image.width || 0,
+              height: snapshot.image.height || 0,
+            });
+          }
+          // Walk children
+          var children = snapshot.children || [];
+          children.forEach(function (childId) {
+            var childRecord = recordMap[childId];
+            if (childRecord && childRecord.snapshot) {
+              collectImageRecords(childRecord.snapshot);
+            }
+          });
+        }
+
+        // Start from all root-level blocks
+        var recordIds = docxRecordObj.recordIds || [];
+        recordIds.forEach(function (recordId) {
+          var record = recordMap[recordId];
+          if (record && record.snapshot) {
+            collectImageRecords(record.snapshot);
+          }
+        });
+
+        document.documentElement.setAttribute('data-feishu-debug',
+          'imgBlocks-' + imageBlocksFound + '-tokensMatched-' + tokensMatched +
+          '-listLen-' + orderedImageBase64List.length);
+      }
+
+      // Fallback: if orderedImageBase64List is empty but we have base64 images,
+      // build the list directly from tokenToBase64 (token order from HTML).
+      if (orderedImageBase64List.length === 0 && tokenCount > 0) {
+        var allTokens = Object.keys(tokenToBase64);
+        allTokens.forEach(function (token) {
+          orderedImageBase64List.push({
+            recordId: '',
+            token: token,
+            base64: tokenToBase64[token],
+            width: 0,
+            height: 0,
+          });
+        });
+        document.documentElement.setAttribute('data-feishu-debug',
+          'fallback-tokenList-' + orderedImageBase64List.length);
+      }
+
+      // New strategy: keep the full docxRecord with image blocks intact.
+      // The upload flow (mount_point=docx_image) will upload images to the
+      // target document, obtain valid tokens, and replace the old tokens
+      // in docxRecord before pasting.  This preserves the complete structure
+      // (grid/table/callout with embedded images) via the docx/record paste path.
+      var hasImages = orderedImageBase64List.length > 0;
+      var shouldDowngrade = false; // No longer downgrade — upload replaces tokens instead
 
       return {
         text: text,
-        html: buildClipboardHtml(htmlWithImages, docxRecordObj),
+        html: buildClipboardHtml(htmlWithImages, docxRecordObj, false),
         docxRecord: docxRecordObj ? JSON.stringify(docxRecordObj) : '',
+        hasDowngradedImages: false,
+        hasImagesToInject: hasImages,
+        hasImagesToUpload: hasImages,
+        orderedImageBase64List: orderedImageBase64List,
+        originalDocxRecordObj: docxRecordObj,
       };
     }).catch(function () {
       return {
@@ -3070,13 +3609,23 @@
       return Promise.reject(new Error('clipboard payload empty'));
     }
 
+    function markClipboardWritten() {
+      try { document.documentElement.setAttribute('data-feishu-clipboard-write', 'ok'); } catch (e) {}
+    }
+
     if (navigator.clipboard && navigator.clipboard.write && typeof ClipboardItem !== 'undefined') {
-      return navigator.clipboard.write([new ClipboardItem(clipboardData)]).catch(function () {
-        return writeClipboardPayloadWithExecCommand(payload);
+      return navigator.clipboard.write([new ClipboardItem(clipboardData)]).then(function () {
+        markClipboardWritten();
+      }).catch(function () {
+        return writeClipboardPayloadWithExecCommand(payload).then(function () {
+          markClipboardWritten();
+        });
       });
     }
 
-    return writeClipboardPayloadWithExecCommand(payload);
+    return writeClipboardPayloadWithExecCommand(payload).then(function () {
+      markClipboardWritten();
+    });
   }
 
   function resolvePastePayload(content) {
@@ -3108,6 +3657,13 @@
     // Any LaTeX-like marker should go through Feishu's native paste parser.
     // Direct DOM insertion preserves the literal "$...$" text but does not
     // trigger the editor's formula conversion, which is most visible in lists.
+    if (hasFeishuStructuredHtml && payloadHasDowngradedImages(payload)) {
+      return {
+        mode: 'nativePaste',
+        requiresNativeParsing: true,
+      };
+    }
+
     if (hasFeishuStructuredHtml) {
       return {
         mode: 'dispatchPasteEvent',
@@ -3132,6 +3688,11 @@
     // Feishu native copy signals structured data via data-docx-has-block-data="true"
     // in HTML AND provides docx/record MIME type on the clipboard.
     return /data-docx-has-block-data="true"/i.test(html) && hasDocxRecord;
+  }
+
+  function payloadHasDowngradedImages(payload) {
+    var html = payload && payload.html ? payload.html : '';
+    return /data-feishu-downgraded-images="true"/i.test(html);
   }
 
   function extractInsertionHtml(html) {
@@ -3166,6 +3727,29 @@
     newRange.collapse(false);
     selection.removeAllRanges();
     selection.addRange(newRange);
+  }
+
+  function preparePasteTarget(target) {
+    if (!target) return false;
+    try {
+      if (!isHiddenPasteTextarea(target) && typeof target.scrollIntoView === 'function') {
+        target.scrollIntoView({ block: 'center', inline: 'nearest' });
+      }
+    } catch (err) {}
+
+    try { target.focus(); } catch (err) {}
+
+    if (isHiddenPasteTextarea(target)) {
+      try {
+        var currentValue = typeof target.value === 'string' ? target.value : '';
+        target.setSelectionRange(currentValue.length, currentValue.length);
+      } catch (err) {}
+      return true;
+    }
+
+    try { target.click(); } catch (err) {}
+    ensureEditorSelection(target);
+    return true;
   }
 
   function insertHtmlFragmentIntoEditor(editor, htmlFragment, textFallback) {
@@ -3216,14 +3800,16 @@
 
     var htmlFragment = extractInsertionHtml(payload && payload.html ? payload.html : '');
     var text = payload && payload.text ? payload.text : '';
-    var candidates = getEditableCandidates();
+    var candidates = getEditableCandidates({
+      purpose: 'insert',
+      includeHiddenTextarea: false,
+    });
 
     for (var i = 0; i < candidates.length; i++) {
       var editor = candidates[i];
       if (!editor) continue;
 
-      editor.focus();
-      ensureEditorSelection(editor);
+      preparePasteTarget(editor);
 
       if (htmlFragment) {
         try {
@@ -3264,10 +3850,10 @@
   }
 
   function dispatchPastePayload(payload) {
-    var editor = getActiveBodyEditor();
-    if (!editor) return false;
+    var target = getActivePasteDispatchTarget();
+    if (!target) return false;
 
-    editor.focus();
+    preparePasteTarget(target);
     var dt = new DataTransfer();
     if (payload && payload.text) dt.setData('text/plain', payload.text);
     if (payload && payload.html) dt.setData('text/html', payload.html);
@@ -3283,7 +3869,7 @@
       Object.defineProperty(beforeInputEvent, 'dataTransfer', {
         value: dt,
       });
-      editor.dispatchEvent(beforeInputEvent);
+      target.dispatchEvent(beforeInputEvent);
     } catch (err) {}
 
     var pasteEvent = new ClipboardEvent('paste', {
@@ -3291,7 +3877,7 @@
       bubbles: true,
       cancelable: true
     });
-    editor.dispatchEvent(pasteEvent);
+    target.dispatchEvent(pasteEvent);
     return true;
   }
 
@@ -3304,10 +3890,52 @@
 
       var content = pendingPaste;
 
+      // If there are images to upload and we haven't uploaded them yet,
+      // trigger the upload flow first, then proceed with paste.
+      var hasImagesToUpload = !!(content.orderedImageBase64List && content.orderedImageBase64List.length)
+        && Object.keys(_uploadedTokenMap).length === 0;
+
+      if (hasImagesToUpload) {
+        showToast('⏳ 上传图片中...', 0);
+        uploadAllImages(content.orderedImageBase64List).then(function (tokenMap) {
+          var uploadedCount = Object.keys(tokenMap).length;
+          if (uploadedCount > 0) {
+            Object.keys(tokenMap).forEach(function (key) {
+              _uploadedTokenMap[key] = tokenMap[key];
+            });
+            // Update pendingPaste docxRecord with replaced tokens
+            var origRecord = content.originalDocxRecordObj;
+            if (origRecord) {
+              var replacedRecord = replaceTokensInDocxRecord(origRecord, tokenMap);
+              content.docxRecord = JSON.stringify(replacedRecord);
+              content.hasImagesToInject = false;
+              content.hasImagesToUpload = false;
+              return setPendingPaste(content).then(function () {
+                showToast('✅ ' + uploadedCount + ' 张图片已上传', 1500);
+                doPaste(content);
+              });
+            }
+          }
+          showToast('✅ ' + uploadedCount + ' 张图片已上传', 1500);
+          doPaste(content);
+        }).catch(function () {
+          showToast('⚠️ 图片上传失败，将粘贴不含图片的内容', 3000);
+          doPaste(content);
+        });
+        return;
+      }
+
+      doPaste(content);
+    });
+
+    function doPaste(content) {
+
       function commitPayload(payload) {
         var needsParser = payloadRequiresPasteParsing(payload);
         var canAutoDispatch = shouldAutoDispatchPastePayload(payload);
         var preferPasteEventOnly = payloadHasFeishuStructuredHtml(payload);
+        var hasDowngradedImages = payloadHasDowngradedImages(payload);
+        var hasImagesToInject = !!(content.orderedImageBase64List && content.orderedImageBase64List.length);
         var needsManualPaste = needsParser && !canAutoDispatch;
 
         writeClipboardPayload(payload).then(function () {
@@ -3315,6 +3943,20 @@
             allowInsert: !preferPasteEventOnly,
             allowDispatch: canAutoDispatch,
           });
+
+          // Mark that image injection is needed after paste.
+          // The MutationObserver will inject after Feishu creates the image blocks
+          // (which happens during Cmd+V, not during this Cmd+Shift+P handler).
+          // The actual base64 data is stored in pendingPaste (IndexedDB).
+          if (hasImagesToInject) {
+            markImageInjectionNeeded(true);
+            startImageInjectionObserver();
+          }
+
+          if (hasDowngradedImages && needsManualPaste) {
+            showToast('📋 检测到图片块已降级到 base64；已写入剪贴板，请直接按 Cmd+V 走飞书原生粘贴以插入图片', 4600);
+            return;
+          }
           showPasteResultToast(status, needsManualPaste, true);
         }).catch(function () {
           showPasteResultToast(runPasteAttempt(payload, {
@@ -3336,7 +3978,425 @@
           html: '',
         });
       });
+    }
+  }
+
+  // Store a flag indicating that image injection is needed after paste.
+  // The actual base64 data is stored in the pendingPaste (IndexedDB),
+  // not in DOM attributes (which have size limits for large base64 strings).
+  function markImageInjectionNeeded(needed) {
+    try {
+      document.documentElement.setAttribute('data-feishu-image-inject-needed', needed ? '1' : '');
+      if (!needed) document.documentElement.removeAttribute('data-feishu-image-inject-needed');
+    } catch (e) {}
+  }
+
+  function isImageInjectionNeeded() {
+    return document.documentElement.getAttribute('data-feishu-image-inject-needed') === '1';
+  }
+
+  // Observe the editor for new image blocks and inject base64 data into them.
+  // This runs continuously so it catches image blocks created by either
+  // Cmd+Shift+P or Cmd+V paste flows.
+  var _imageInjectionObserver = null;
+  var _imageInjectionRetryCount = 0;
+  var MAX_IMAGE_INJECTION_RETRIES = 8;
+
+  function startImageInjectionObserver() {
+    if (_imageInjectionObserver) return;
+    var target = document.querySelector('[data-content-editable-root="true"]') || document.body;
+    _imageInjectionObserver = new MutationObserver(function (mutations) {
+      if (!isImageInjectionNeeded()) return;
+      // Debounce: wait a tick so all blocks from a paste batch are in the DOM
+      clearTimeout(_imageInjectionObserver._timer);
+      _imageInjectionObserver._timer = setTimeout(function () {
+        // Read the image list from IndexedDB (pendingPaste)
+        getPendingPaste().then(function (pending) {
+          var list = (pending && pending.orderedImageBase64List) || [];
+          if (!list.length) return;
+          var count = injectBase64ImagesIntoEditor(list);
+          if (count >= list.length) {
+            markImageInjectionNeeded(false);
+            _imageInjectionRetryCount = 0;
+          } else if (count > 0) {
+            _imageInjectionRetryCount++;
+            if (_imageInjectionRetryCount < MAX_IMAGE_INJECTION_RETRIES) {
+              setTimeout(function () {
+                getPendingPaste().then(function (p) {
+                  if (p && p.orderedImageBase64List) {
+                    injectBase64ImagesIntoEditor(p.orderedImageBase64List);
+                  }
+                });
+              }, 1500);
+            }
+          }
+        });
+      }, 500);
     });
+    _imageInjectionObserver.observe(target, { childList: true, subtree: true });
+  }
+
+  // Inject base64 images into image block placeholders in the editor.
+  // After an HTML paste, image blocks may exist but show as loading/empty
+  // placeholders because Feishu's upload pipeline may not handle base64 src.
+  // This function finds those blocks by position and sets the img src to base64.
+  function injectBase64ImagesIntoEditor(orderedImageBase64List) {
+    if (!orderedImageBase64List || !orderedImageBase64List.length) return 0;
+
+    var editable = document.querySelector('[data-content-editable-root="true"], [contenteditable="true"]');
+    if (!editable) return 0;
+
+    var imageBlocks = editable.querySelectorAll('[data-block-type="image"]');
+    if (!imageBlocks.length) return 0;
+
+    var injected = 0;
+    imageBlocks.forEach(function (block, index) {
+      if (index >= orderedImageBase64List.length) return;
+      var imageData = orderedImageBase64List[index];
+      if (!imageData || !imageData.base64) return;
+
+      var dataUrl = imageData.base64.indexOf('data:') === 0
+        ? imageData.base64
+        : 'data:image/png;base64,' + imageData.base64;
+
+      // Strategy 1: find existing <img> and set its src
+      var img = block.querySelector('img');
+      if (img) {
+        // Only inject if the current src is not already our base64
+        if (img.src !== dataUrl) {
+          img.src = dataUrl;
+        }
+        if (imageData.width) img.setAttribute('width', imageData.width);
+        if (imageData.height) img.setAttribute('height', imageData.height);
+        injected++;
+        return;
+      }
+
+      // Strategy 2: find the image content container and create an img element
+      var container = block.querySelector(
+        '.img, [class*="image-content"], [class*="img-container"], ' +
+        '[class*="ImgContainer"], [class*="image-wrap"]'
+      );
+      if (container) {
+        img = document.createElement('img');
+        img.src = dataUrl;
+        img.style.maxWidth = '100%';
+        img.style.height = 'auto';
+        img.style.display = 'block';
+        if (imageData.width) img.setAttribute('width', imageData.width);
+        if (imageData.height) img.setAttribute('height', imageData.height);
+        container.appendChild(img);
+        injected++;
+        return;
+      }
+
+      // Strategy 3: try to find the React fiber node and update it
+      var fiberKey = Object.getOwnPropertyNames(block).find(function (k) {
+        return k.startsWith('__reactFiber$') || k.startsWith('__reactInternalInstance$');
+      });
+      if (fiberKey) {
+        // If there's a fiber, the component might re-render our changes away.
+        // Set a data attribute so our MutationObserver can re-inject.
+        block.setAttribute('data-feishu-inject-src', dataUrl);
+        if (imageData.width) block.setAttribute('data-feishu-inject-width', imageData.width);
+        if (imageData.height) block.setAttribute('data-feishu-inject-height', imageData.height);
+        injected++;
+      }
+    });
+
+    return injected;
+  }
+
+  // ── Image Upload via Feishu Internal API ──
+  // Upload base64 images to the current document and get valid tokens.
+  // Strategy: use the Feishu editor's own upload pipeline by inspecting
+  // the externalSaver service and calling its internal upload method,
+  // or by calling the discovered internal API endpoint directly.
+
+  // Get the image-manager service from the editor's DI container
+  function getImageManagerService() {
+    var editorAPI = getEditorAPI();
+    if (!editorAPI || !editorAPI._renderer || !editorAPI._renderer.injectionService) return null;
+    var rootInj = editorAPI._renderer.injectionService.rootInjector;
+    if (!rootInj || !rootInj._instanceMap) return null;
+    var service = null;
+    try {
+      rootInj._instanceMap.forEach(function (val, key) {
+        if (!service && String(key).indexOf('image-manager') !== -1) {
+          service = val;
+        }
+      });
+    } catch (e) {}
+    return service;
+  }
+
+  // Discover the internal upload API by checking captured requests or using
+  // the known endpoint. Returns captured request info + obj_token for wiki pages.
+  function discoverUploadApi() {
+    // Check if we already captured a real upload request (e.g. from manual image paste)
+    var realCapture = null;
+    for (var i = _feishuCapturedUploads.length - 1; i >= 0; i--) {
+      var c = _feishuCapturedUploads[i];
+      if (/box\/stream\/upload|box\/image\/create|medias\/upload/i.test(c.url)) {
+        realCapture = c;
+        break;
+      }
+    }
+
+    var uploadApi;
+    if (realCapture) {
+      // Use the real captured parameters (especially mount_point)
+      uploadApi = realCapture;
+      console.info('[Feishu Helper] Using captured upload API with params:', realCapture.queryParams);
+    } else {
+      // Fall back to known endpoint from code analysis
+      uploadApi = {
+        url: '/space/api/box/stream/upload/all/',
+        method: 'POST',
+        bodyType: 'FormData',
+        timestamp: Date.now(),
+        headers: {
+          'biz-ua-type': 'Web',
+          'biz-scene': 'file_upload',
+        },
+        formDataFields: [{ key: 'file', type: 'File' }],
+        queryParams: {
+          mount_point: 'docx_image',
+          push_open_history_record: '0',
+        },
+      };
+    }
+
+    // For wiki pages, we need the obj_token (underlying doc token)
+    // Check if this is a wiki page and resolve the obj_token
+    var isWiki = false;
+    var docToken = '';
+    try {
+      var m = location.pathname.match(/\/(docx|wiki|doc)\/([A-Za-z0-9]+)/);
+      if (m) {
+        isWiki = m[1] === 'wiki';
+        docToken = m[2];
+      }
+    } catch (e) {}
+
+    if (isWiki && docToken) {
+      // For wiki pages, we need to resolve the obj_token first
+      return _originalFetch('/space/api/wiki/v2/tree/get_node/?wiki_token=' + docToken + '&expand_shortcut=true&with_deleted=true', {
+        credentials: 'include',
+      }).then(function (r) {
+        return r.json();
+      }).then(function (data) {
+        var objToken = '';
+        // The API returns obj_token in either data.data.node.obj_token or data.data.obj_token
+        var node = (data && data.data && data.data.node) || data.data || {};
+        if (node.obj_token) {
+          objToken = node.obj_token;
+        }
+        var result = {
+          captured: [uploadApi],
+          objToken: objToken,
+          wikiToken: docToken,
+          imageBlockCount: document.querySelectorAll('[data-block-type="image"]').length,
+        };
+        try {
+          document.documentElement.setAttribute('data-feishu-upload-api-discovery',
+            JSON.stringify(result));
+        } catch (e) {}
+        return result;
+      }).catch(function () {
+        return {
+          captured: [uploadApi],
+          objToken: docToken,
+          wikiToken: isWiki ? docToken : '',
+          imageBlockCount: 0,
+        };
+      });
+    }
+
+    var result = {
+      captured: [uploadApi],
+      objToken: docToken,
+      wikiToken: '',
+      imageBlockCount: document.querySelectorAll('[data-block-type="image"]').length,
+    };
+    try {
+      document.documentElement.setAttribute('data-feishu-upload-api-discovery',
+        JSON.stringify(result));
+    } catch (e) {}
+    return Promise.resolve(result);
+  }
+
+  // Upload a single base64 image to the current document using the
+  // Feishu internal API. Returns the new valid token.
+  // If we captured a real upload request, reuse its mount_point & URL pattern.
+  // objToken: resolved wiki obj_token (overrides URL token for wiki pages)
+  function uploadBase64ImageViaApi(base64Data, width, height, discoveredApi, objToken) {
+    // Convert base64 to Blob
+    var dataUrl = base64Data.indexOf('data:') === 0 ? base64Data : 'data:image/png;base64,' + base64Data;
+    var base64Part = dataUrl.split(',')[1] || '';
+    var mimeMatch = dataUrl.match(/data:(image\/\w+);/);
+    var mimeType = mimeMatch ? mimeMatch[1] : 'image/png';
+    var ext = mimeType.split('/')[1] || 'png';
+
+    var byteString = atob(base64Part);
+    var ab = new ArrayBuffer(byteString.length);
+    var ia = new Uint8Array(ab);
+    for (var i = 0; i < byteString.length; i++) {
+      ia[i] = byteString.charCodeAt(i);
+    }
+    var blob = new Blob([ab], { type: mimeType });
+    var fileName = 'image.' + ext;
+    var fileSize = blob.size;
+
+    // Get the document token — prefer resolved objToken (for wiki pages) over URL token
+    var docToken = objToken || '';
+    if (!docToken) {
+      try {
+        var m = location.pathname.match(/\/(docx|wiki|doc)\/([A-Za-z0-9]+)/);
+        if (m) docToken = m[2];
+      } catch (e) {}
+    }
+
+    // Build the upload URL using captured or default parameters
+    var uploadUrl;
+    var uploadHeaders = {
+      'biz-ua-type': 'Web',
+      'biz-scene': 'file_upload',
+    };
+
+    if (discoveredApi && discoveredApi.queryParams && Object.keys(discoveredApi.queryParams).length > 0) {
+      // Reconstruct URL from the captured base path + our file params
+      var baseUrl = discoveredApi.url.split('?')[0];
+      var params = {};
+      // Copy non-file-specific params from the captured request
+      if (discoveredApi.queryParams.mount_point) params.mount_point = discoveredApi.queryParams.mount_point;
+      // Always include mount_node_token with our resolved docToken
+      if (docToken) {
+        params.mount_node_token = docToken;
+      } else if (discoveredApi.queryParams.mount_node_token) {
+        params.mount_node_token = discoveredApi.queryParams.mount_node_token;
+      }
+      if (discoveredApi.queryParams.push_open_history_record !== undefined) {
+        params.push_open_history_record = discoveredApi.queryParams.push_open_history_record;
+      }
+      // Add file-specific params
+      params.name = fileName;
+      params.size = fileSize;
+      // Copy any extra params from captured request
+      Object.keys(discoveredApi.queryParams).forEach(function (k) {
+        if (!params[k] && k !== 'name' && k !== 'size') {
+          params[k] = discoveredApi.queryParams[k];
+        }
+      });
+
+      var qs = Object.keys(params).map(function (k) {
+        return encodeURIComponent(k) + '=' + encodeURIComponent(params[k]);
+      }).join('&');
+      uploadUrl = baseUrl + '?' + qs;
+
+      // Merge any captured headers
+      if (discoveredApi.headers) {
+        Object.keys(discoveredApi.headers).forEach(function (k) {
+          uploadHeaders[k] = discoveredApi.headers[k];
+        });
+      }
+      console.info('[Feishu Helper] Uploading with captured params:', params);
+    } else {
+      // Fall back to known endpoint with correct mount_point for document images
+      // docx_image = upload image to docx document (NOT ccm_import which is for cloud import)
+      uploadUrl = '/space/api/box/stream/upload/all/?name=' + encodeURIComponent(fileName) +
+        '&size=' + fileSize +
+        '&mount_point=docx_image' +
+        '&mount_node_token=' + encodeURIComponent(docToken) +
+        '&push_open_history_record=0';
+      console.info('[Feishu Helper] Uploading with default params (no capture available)');
+    }
+
+    var formData = new FormData();
+    formData.append('file', blob, fileName);
+
+    return _originalFetch(uploadUrl, {
+      method: 'POST',
+      body: formData,
+      credentials: 'include',
+      headers: uploadHeaders,
+    }).then(function (r) {
+      return r.json();
+    }).then(function (data) {
+      var token = '';
+      if (data && data.data) {
+        token = data.data.token || data.data.file_token || data.data.image_key || '';
+      }
+      if (!token && data && data.result) {
+        token = data.result.token || data.result.file_token || data.result.image_key || '';
+      }
+      console.info('[Feishu Helper] Upload result:', { token: token, code: data && data.code, msg: data && data.msg });
+      return { token: token, raw: data };
+    }).catch(function (err) {
+      return { token: '', error: String(err) };
+    });
+  }
+
+  // Upload all base64 images and return token mapping (oldToken → newToken)
+  function uploadAllImages(orderedImageBase64List) {
+    if (!orderedImageBase64List || !orderedImageBase64List.length) {
+      return Promise.resolve({});
+    }
+
+    // First, discover the upload API (also resolves obj_token for wiki pages)
+    return discoverUploadApi().then(function (discovery) {
+      var discoveredApi = null;
+      if (discovery.captured && discovery.captured.length > 0) {
+        discoveredApi = discovery.captured[0];
+      }
+
+      var resolvedObjToken = discovery.objToken || '';
+
+      // Upload each image sequentially to avoid overwhelming the server
+      var tokenMap = {};
+      var chain = Promise.resolve();
+      var total = orderedImageBase64List.length;
+
+      orderedImageBase64List.forEach(function (img, index) {
+        chain = chain.then(function () {
+          return uploadBase64ImageViaApi(img.base64, img.width, img.height, discoveredApi, resolvedObjToken);
+        }).then(function (result) {
+          if (result.token) {
+            tokenMap[img.token] = result.token;
+          }
+          try {
+            document.documentElement.setAttribute('data-feishu-upload-progress',
+              JSON.stringify({ index: index, total: total, oldToken: img.token, newToken: result.token || '', error: result.error || '' }));
+          } catch (e) {}
+        }).catch(function (err) {
+          try {
+            document.documentElement.setAttribute('data-feishu-upload-progress',
+              JSON.stringify({ index: index, total: total, oldToken: img.token, error: String(err) }));
+          } catch (e) {}
+        });
+      });
+
+      return chain.then(function () { return tokenMap; });
+    });
+  }
+
+  // Replace tokens in docxRecord with new valid tokens
+  function replaceTokensInDocxRecord(docxRecordObj, tokenMap) {
+    if (!docxRecordObj || !tokenMap || Object.keys(tokenMap).length === 0) return docxRecordObj;
+    var clone = JSON.parse(JSON.stringify(docxRecordObj));
+    var recordMap = clone.recordMap || {};
+    var replaced = 0;
+    Object.keys(recordMap).forEach(function (recordId) {
+      var record = recordMap[recordId];
+      if (record && record.snapshot && record.snapshot.type === 'image' && record.snapshot.image) {
+        var oldToken = record.snapshot.image.token || '';
+        if (oldToken && tokenMap[oldToken]) {
+          record.snapshot.image.token = tokenMap[oldToken];
+          replaced++;
+        }
+      }
+    });
+    return clone;
   }
 
   function extractImages() {
@@ -3793,7 +4853,7 @@
         result = { path: path, type: 'function', name: obj.name || '', length: obj.length };
       } else if (resultType === 'object') {
         var keys = [];
-        try { keys = Object.keys(obj).slice(0, 50); } catch (err) {}
+        try { keys = safeGetOwnKeys(obj).slice(0, 80); } catch (err) {}
         result = { path: path, type: 'object', keys: keys };
       } else {
         var str = String(obj);
@@ -3804,6 +4864,30 @@
       document.documentElement.setAttribute('data-feishu-path-result', JSON.stringify({ error: String(err.message || err) }));
     }
   }, true);
+  registerEventListener(document, 'feishu-inspect-path', function (e) {
+    try {
+      var path = e.detail && e.detail.path ? String(e.detail.path) : '';
+      if (!path) {
+        document.documentElement.setAttribute('data-feishu-path-inspection', JSON.stringify({ error: 'no path' }));
+        return;
+      }
+      var resolved = resolveEditorPath(path);
+      if (!resolved.ok) {
+        document.documentElement.setAttribute('data-feishu-path-inspection', JSON.stringify({
+          ok: false,
+          path: resolved.label || path,
+          error: String(resolved.error && resolved.error.message ? resolved.error.message : resolved.error),
+        }));
+        return;
+      }
+      var summary = summarizeObjectValue(resolved.value, /image|img|upload|asset|media|resource|clip|copy|paste|command|service|docx|token|block|data/i);
+      summary.ok = true;
+      summary.path = resolved.label;
+      document.documentElement.setAttribute('data-feishu-path-inspection', JSON.stringify(summary));
+    } catch (err) {
+      document.documentElement.setAttribute('data-feishu-path-inspection', JSON.stringify({ error: String(err && err.message ? err.message : err) }));
+    }
+  }, true);
   // Listen for native copy capture requests from AppleScript's JS context.
   registerEventListener(document, 'feishu-capture-copy', function () {
     try {
@@ -3811,6 +4895,243 @@
         window.__feishuCaptureNextCopy();
       }
     } catch (e) {}
+  }, true);
+  registerEventListener(document, 'feishu-call-service', function (e) {
+    try {
+      var serviceName = e.detail && e.detail.service ? String(e.detail.service) : '';
+      var method = e.detail && e.detail.method ? String(e.detail.method) : '';
+      var args = e.detail && e.detail.args ? e.detail.args : [];
+      var resultAttr = 'data-feishu-service-result';
+      if (!serviceName) {
+        document.documentElement.setAttribute(resultAttr, JSON.stringify({ error: 'no service name' }));
+        return;
+      }
+      var editorAPI = getEditorAPI();
+      if (!editorAPI || !editorAPI._renderer || !editorAPI._renderer.injectionService) {
+        document.documentElement.setAttribute(resultAttr, JSON.stringify({ error: 'no injectionService' }));
+        return;
+      }
+      // Try _instanceMap first (Map with already-instantiated services),
+      // then fall back to _resolve / get for lazy providers.
+      var injService = editorAPI._renderer.injectionService;
+      var rootInj = injService.rootInjector;
+      var service = null;
+      // The _instanceMap is a Map. Its keys might be strings or objects.
+      // Try string key first, then iterate to find by name match.
+      if (rootInj._instanceMap && typeof rootInj._instanceMap.get === 'function') {
+        service = rootInj._instanceMap.get(serviceName);
+        if (!service) {
+          // Iterate Map entries to find by key.toString() match
+          try {
+            rootInj._instanceMap.forEach(function (val, key) {
+              if (!service && String(key) === serviceName) {
+                service = val;
+              }
+            });
+          } catch (mapErr) {}
+        }
+      }
+      if (!service && typeof injService.get === 'function') {
+        try { service = injService.get(serviceName); } catch (e) {}
+      }
+      if (!service && typeof rootInj._resolve === 'function') {
+        try { service = rootInj._resolve(serviceName); } catch (e) {}
+      }
+      if (!service) {
+        document.documentElement.setAttribute(resultAttr, JSON.stringify({ error: 'service not found: ' + serviceName }));
+        return;
+      }
+      if (!method) {
+        // Return service keys for inspection
+        var keys = [];
+        try { keys = safeGetOwnKeys(service).slice(0, 50); } catch (err) {}
+        document.documentElement.setAttribute(resultAttr, JSON.stringify({ service: serviceName, type: typeof service, keys: keys }));
+        return;
+      }
+      // Support dot-separated paths for nested property access, e.g. "externalSaver.uploadImage"
+      var methodParts = method.split('.');
+      var target = service;
+      for (var pi = 0; pi < methodParts.length - 1; pi++) {
+        if (target == null) break;
+        target = target[methodParts[pi]];
+      }
+      var finalMethod = methodParts[methodParts.length - 1];
+      if (!target || typeof target[finalMethod] !== 'function') {
+        // If it's a property (not a function), return its value for inspection
+        if (target && target[finalMethod] !== undefined) {
+          var propVal = target[finalMethod];
+          if (typeof propVal === 'object' && propVal !== null) {
+            var propKeys = [];
+            try { propKeys = safeGetOwnKeys(propVal).slice(0, 50); } catch (err) {}
+            document.documentElement.setAttribute(resultAttr, JSON.stringify({ service: serviceName, property: method, type: typeof propVal, keys: propKeys }));
+          } else {
+            document.documentElement.setAttribute(resultAttr, JSON.stringify({ service: serviceName, property: method, type: typeof propVal, value: String(propVal).substring(0, 200) }));
+          }
+          return;
+        }
+        document.documentElement.setAttribute(resultAttr, JSON.stringify({ error: 'method/property not found: ' + method, availableKeys: target ? safeGetOwnKeys(target).slice(0, 50) : [] }));
+        return;
+      }
+      var result = target[finalMethod].apply(target, args);
+      // Handle both sync and async results
+      if (result && typeof result.then === 'function') {
+        result.then(function (val) {
+          var serialized = val;
+          if (val && typeof val === 'object') {
+            try { serialized = JSON.parse(JSON.stringify(val)); } catch (err) {
+              try { serialized = { keys: safeGetOwnKeys(val).slice(0, 30) }; } catch (e2) { serialized = '[object]'; }
+            }
+          }
+          document.documentElement.setAttribute(resultAttr, JSON.stringify({ service: serviceName, method: method, async: true, result: serialized }));
+        }).catch(function (err) {
+          document.documentElement.setAttribute(resultAttr, JSON.stringify({ service: serviceName, method: method, async: true, error: String(err.message || err) }));
+        });
+      } else {
+        document.documentElement.setAttribute(resultAttr, JSON.stringify({ service: serviceName, method: method, async: false, result: result }));
+      }
+    } catch (err) {
+      document.documentElement.setAttribute('data-feishu-service-result', JSON.stringify({ error: String(err.message || err) }));
+    }
+  }, true);
+  registerEventListener(document, 'feishu-prepare-native-paste', function () {
+    try {
+      document.documentElement.setAttribute('data-feishu-native-paste-prepare', JSON.stringify({ status: 'running' }));
+      preparePendingPasteForNativePaste().then(function (summary) {
+        document.documentElement.setAttribute('data-feishu-native-paste-prepare', JSON.stringify({
+          status: 'success',
+          summary: summary || null,
+        }));
+      }).catch(function (error) {
+        document.documentElement.setAttribute('data-feishu-native-paste-prepare', JSON.stringify({
+          status: 'error',
+          error: String(error && error.stack ? error.stack : error),
+        }));
+      });
+    } catch (error) {
+      document.documentElement.setAttribute('data-feishu-native-paste-prepare', JSON.stringify({
+        status: 'error',
+        error: String(error && error.stack ? error.stack : error),
+      }));
+    }
+  }, true);
+  // Listen for token map setting from runner.
+  // e.detail should have: { tokenMap: { oldToken: newToken, ... } }
+  registerEventListener(document, 'feishu-set-token-map', function (e) {
+    try {
+      var tokenMap = (e.detail && e.detail.tokenMap) || {};
+      if (tokenMap && typeof tokenMap === 'object') {
+        Object.keys(tokenMap).forEach(function (key) {
+          _uploadedTokenMap[key] = tokenMap[key];
+        });
+        document.documentElement.setAttribute('data-feishu-token-map-set',
+          JSON.stringify({ count: Object.keys(_uploadedTokenMap).length }));
+      }
+    } catch (err) {
+      document.documentElement.setAttribute('data-feishu-token-map-set',
+        JSON.stringify({ error: String(err.message || err) }));
+    }
+  }, true);
+  registerEventListener(document, 'feishu-discover-upload-api', function () {
+    try {
+      discoverUploadApi().then(function (result) {
+        document.documentElement.setAttribute('data-feishu-upload-api-result',
+          JSON.stringify(result));
+      });
+    } catch (e) {
+      document.documentElement.setAttribute('data-feishu-upload-api-result',
+        JSON.stringify({ error: String(e.message || e) }));
+    }
+  }, true);
+  // Listen for image upload requests from runner.
+  // e.detail should have: { images: [{base64, token, width, height}, ...] }
+  registerEventListener(document, 'feishu-upload-images', function (e) {
+    try {
+      var images = (e.detail && e.detail.images) || [];
+      if (!images.length) {
+        document.documentElement.setAttribute('data-feishu-upload-result',
+          JSON.stringify({ error: 'no images provided' }));
+        return;
+      }
+      uploadAllImages(images).then(function (tokenMap) {
+        // Directly populate _uploadedTokenMap so the paste flow can use it
+        // without waiting for the runner to echo it back
+        Object.keys(tokenMap).forEach(function (key) {
+          _uploadedTokenMap[key] = tokenMap[key];
+        });
+        document.documentElement.setAttribute('data-feishu-upload-result',
+          JSON.stringify({ tokenMap: tokenMap, count: Object.keys(tokenMap).length }));
+      }).catch(function (err) {
+        document.documentElement.setAttribute('data-feishu-upload-result',
+          JSON.stringify({ error: String(err && err.message || err) }));
+      });
+    } catch (err) {
+      document.documentElement.setAttribute('data-feishu-upload-result',
+        JSON.stringify({ error: String(err.message || err) }));
+    }
+  }, true);
+  // Listen for image upload requests that read from IndexedDB's pendingPaste.
+  // This is used by the runner when the target page already has the
+  // orderedImageBase64List stored in IndexedDB (too large for DOM attributes).
+  registerEventListener(document, 'feishu-upload-pending-images', function () {
+    try {
+      getPendingPaste().then(function (pending) {
+        var images = (pending && pending.orderedImageBase64List) || [];
+        if (!images.length) {
+          document.documentElement.setAttribute('data-feishu-upload-result',
+            JSON.stringify({ error: 'no pending images found in IndexedDB' }));
+          return;
+        }
+        uploadAllImages(images).then(function (tokenMap) {
+          Object.keys(tokenMap).forEach(function (key) {
+            _uploadedTokenMap[key] = tokenMap[key];
+          });
+          // Also update the pendingPaste docxRecord with new tokens
+          // so the next Cmd+Shift+P paste uses the valid tokens.
+          var origRecord = pending && pending.originalDocxRecordObj;
+          if (origRecord && Object.keys(tokenMap).length > 0) {
+            var replacedRecord = replaceTokensInDocxRecord(origRecord, tokenMap);
+            pending.docxRecord = JSON.stringify(replacedRecord);
+            pending.hasImagesToInject = false;
+            pending.hasImagesToUpload = false;
+            return setPendingPaste(pending).then(function () {
+              document.documentElement.setAttribute('data-feishu-upload-result',
+                JSON.stringify({ tokenMap: tokenMap, count: Object.keys(tokenMap).length, pendingUpdated: true }));
+            });
+          }
+          document.documentElement.setAttribute('data-feishu-upload-result',
+            JSON.stringify({ tokenMap: tokenMap, count: Object.keys(tokenMap).length }));
+        }).catch(function (err) {
+          document.documentElement.setAttribute('data-feishu-upload-result',
+            JSON.stringify({ error: String(err && err.message || err) }));
+        });
+      }).catch(function (err) {
+        document.documentElement.setAttribute('data-feishu-upload-result',
+          JSON.stringify({ error: String(err && err.message || err) }));
+      });
+    } catch (err) {
+      document.documentElement.setAttribute('data-feishu-upload-result',
+        JSON.stringify({ error: String(err.message || err) }));
+    }
+  }, true);
+  // Listen for image injection requests from AppleScript's JS context.
+  // The runner calls this after Cmd+V paste completes to trigger base64
+  // injection into image block placeholders.
+  registerEventListener(document, 'feishu-inject-images', function () {
+    try {
+      getPendingPaste().then(function (pending) {
+        var list = (pending && pending.orderedImageBase64List) || [];
+        var count = injectBase64ImagesIntoEditor(list);
+        var editable = document.querySelector('[data-content-editable-root="true"], [contenteditable="true"]');
+        var imageBlocks = editable ? editable.querySelectorAll('[data-block-type="image"]') : [];
+        document.documentElement.setAttribute('data-feishu-image-inject-result', JSON.stringify({
+          injected: count,
+          pending: list.length,
+          imageBlocks: imageBlocks.length,
+        }));
+      });
+    } catch (e) {
+      document.documentElement.setAttribute('data-feishu-image-inject-result', JSON.stringify({ error: String(e.message || e) }));
+    }
   }, true);
   // Listen for copy capture result reading from AppleScript's JS context.
   registerEventListener(document, 'feishu-read-copy-capture', function () {
@@ -3852,6 +5173,12 @@
       }
     } catch (e) {}
   }, 500);
+  // Start the image injection observer so it's ready before any paste action.
+  // It watches for new [data-block-type="image"] elements and injects stored
+  // base64 data into them after a paste creates image block placeholders.
+  setTimeout(function () {
+    startImageInjectionObserver();
+  }, 2000);
   window.__tampermonkeyScriptDebugExports = function () {
     return {
       name: SCRIPT_NAME,
@@ -3999,6 +5326,16 @@
   window.__feishuShouldAutoDispatchPastePayload = shouldAutoDispatchPastePayload;
   window.__feishuPreparePendingPasteForNativePaste = preparePendingPasteForNativePaste;
   window.__feishuCaptureValidationSnapshot = captureValidationSnapshot;
+  window.__feishuInjectBase64Images = function () {
+    // This won't work from AppleScript's isolated world - use feishu-inject-images event instead
+    return 0;
+  };
+  window.__feishuGetImageInjectionStatus = function () {
+    var needed = isImageInjectionNeeded();
+    var editable = document.querySelector('[data-content-editable-root="true"], [contenteditable="true"]');
+    var imageBlocks = editable ? editable.querySelectorAll('[data-block-type="image"]') : [];
+    return { injectionNeeded: needed, imageBlockCount: imageBlocks.length };
+  };
   window.__feishuExtractInsertionHtml = extractInsertionHtml;
   window.__feishuInsertPayloadIntoEditor = insertPayloadIntoEditor;
   window.__feishuDispatchPastePayload = dispatchPastePayload;
