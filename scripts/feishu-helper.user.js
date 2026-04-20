@@ -45,6 +45,10 @@
     synced_reference: '引用块',
   };
   var runtimeDisposers = [];
+  var lastDocxRecord = null;
+  var lastCopyCapture = null;
+  var copyCaptureCleanup = null;
+  var FeishuHelperModules = null;
 
   function registerRuntimeDisposer(disposer) {
     if (typeof disposer !== 'function') return disposer;
@@ -2466,8 +2470,7 @@
     var finalHtml = finalizeHtmlFragment(htmlParts.join('\n'));
     var finalText = normalizePlainText(mdParts.join('\n'));
     var docxRecord = buildDocxRecordPayload(ss);
-    // Expose for debugging — inspect via __feishuLastDocxRecord in console.
-    window.__feishuLastDocxRecord = docxRecord;
+    lastDocxRecord = docxRecord;
     var result = {
       html: finalHtml,
       text: finalText,
@@ -4899,7 +4902,9 @@
   registerEventListener(document, 'feishu-explore-api', function (e) {
     try {
       var pattern = e.detail && e.detail.pattern ? new RegExp(e.detail.pattern, 'i') : /insert|command|apply|mutation|addBlock|createBlock|updateBlock|paste|clipboard/;
-      var result = window.__feishuFindEditorPaths(pattern);
+      var result = FeishuHelperModules && FeishuHelperModules.debug
+        ? FeishuHelperModules.debug.findEditorPaths(pattern)
+        : [];
       document.documentElement.setAttribute('data-feishu-api-paths', JSON.stringify(result));
     } catch (err) {
       document.documentElement.setAttribute('data-feishu-api-paths', JSON.stringify({ error: String(err.message || err) }));
@@ -4972,8 +4977,8 @@
   // Listen for native copy capture requests from AppleScript's JS context.
   registerEventListener(document, 'feishu-capture-copy', function () {
     try {
-      if (typeof window.__feishuCaptureNextCopy === 'function') {
-        window.__feishuCaptureNextCopy();
+      if (FeishuHelperModules && FeishuHelperModules.debug && typeof FeishuHelperModules.debug.captureNextCopy === 'function') {
+        FeishuHelperModules.debug.captureNextCopy();
       }
     } catch (e) {}
   }, true);
@@ -5217,7 +5222,7 @@
   // Listen for copy capture result reading from AppleScript's JS context.
   registerEventListener(document, 'feishu-read-copy-capture', function () {
     try {
-      var capture = window.__feishuLastCopyCapture || null;
+      var capture = lastCopyCapture || null;
       if (capture) {
         // Only keep the essential data (HTML and MIME types), not raw Blobs
         var summary = {
@@ -5235,10 +5240,9 @@
     } catch (e) {}
   }, true);
 
-  window.__feishuHelperVersion = SCRIPT_VERSION;
   // Write a DOM attribute to signal that TM has injected, so AppleScript's
   // execute javascript (which runs in a separate Chrome isolated world and
-  // cannot see window.__feishuHelperVersion) can detect injection.
+  // cannot see TM-scoped globals) can detect injection.
   try {
     document.documentElement.setAttribute('data-feishu-helper-active', SCRIPT_VERSION);
   } catch (e) {}
@@ -5260,44 +5264,8 @@
   setTimeout(function () {
     startImageInjectionObserver();
   }, 2000);
-  window.__tampermonkeyScriptDebugExports = function () {
-    return {
-      name: SCRIPT_NAME,
-      version: SCRIPT_VERSION,
-      automation: {
-        requestEvent: AUTOMATION_REQUEST_EVENT,
-        resultEvent: AUTOMATION_RESULT_EVENT,
-        defaultAction: 'duplicateDocument',
-        actions: ['duplicateDocument', 'realTestDuplicateDocument'],
-      },
-      exports: {
-        extractFullDoc: typeof window.__feishuExtractFullDoc,
-        pasteIntoDoc: typeof window.__feishuPasteIntoDoc,
-        preparePendingPasteForNativePaste: typeof window.__feishuPreparePendingPasteForNativePaste,
-        captureValidationSnapshot: typeof window.__feishuCaptureValidationSnapshot,
-        getLastExtractionDebug: typeof window.__feishuGetLastExtractionDebug,
-        getEditorReadyState: typeof window.__feishuGetEditorReadyState,
-        debugEditorAPI: typeof window.__feishuDebugEditorAPI,
-        captureNextCopy: typeof window.__feishuCaptureNextCopy,
-        runAutomationAction: typeof window.__feishuRunAutomationAction,
-      },
-    };
-  };
-  window.__feishuDebugExports = function () {
-    return window.__tampermonkeyScriptDebugExports();
-  };
-  window.__feishuRunAutomationAction = function (options) {
-    var action = typeof options === 'string'
-      ? options
-      : options && options.action;
-    return runAutomationAction(action);
-  };
-  window.__feishuGetPendingPasteSummary = summarizePendingPasteForAutomation;
-  window.__feishuGetPendingPasteTimestamp = getPendingPasteTimestamp;
-  window.__feishuGetEditorReadyState = getEditorReadyState;
-  window.__feishuGetLastExtractionDebug = getLastExtractionDebug;
-  window.__feishuGetImageConversionStatus = getImageConversionStatus;
-  window.__feishuResetImageConversionStatus = function () {
+
+  function resetImageConversionStatus() {
     imageConversionStatus = {
       state: 'idle',
       done: 0,
@@ -5305,12 +5273,14 @@
       updatedAt: 0,
       error: '',
     };
-  };
-  window.__feishuGetLastCopyCapture = function () {
-    return window.__feishuLastCopyCapture || null;
-  };
-  window.__feishuSummarizeLastCopyCapture = function () {
-    var capture = window.__feishuLastCopyCapture;
+  }
+
+  function getLastCopyCapture() {
+    return lastCopyCapture || null;
+  }
+
+  function summarizeLastCopyCapture() {
+    var capture = lastCopyCapture;
     if (!capture) return null;
 
     var summary = {
@@ -5348,8 +5318,9 @@
     console.log('[Feishu Helper] last copy capture summary');
     console.log(summary);
     return summary;
-  };
-  window.__feishuInspectEditorPath = function (path) {
+  }
+
+  function inspectEditorPath(path) {
     var resolved = resolveEditorPath(path);
     if (!resolved.ok) {
       var errorSummary = {
@@ -5368,8 +5339,9 @@
     console.log('[Feishu Helper] inspect path', resolved.label);
     console.log(summary);
     return summary;
-  };
-  window.__feishuFindEditorPaths = function (pattern) {
+  }
+
+  function findEditorPaths(pattern) {
     var editorAPI = getEditorAPI();
     if (!editorAPI) {
       console.log('[Feishu Helper] no editorAPI');
@@ -5387,41 +5359,16 @@
     console.log('[Feishu Helper] matched editor paths', regex);
     console.log(all);
     return all;
-  };
-  window.__feishuExtractFullDoc = extractFullDoc;
-  window.__feishuDuplicateDoc = duplicateDocument;
-  window.__feishuDuplicateDocForAutomation = duplicateDocumentForAutomation;
-  window.__feishuPasteIntoDoc = pasteIntoDoc;
-  window.__feishuDecodeFeishuAttribsToHtml = decodeFeishuAttribsToHtml;
-  window.__feishuDecodeBlockHtml = decodeBlockHtml;
-  window.__feishuNormalizeBlockStyle = normalizeBlockStyle;
-  window.__feishuBlockToHtml = blockToHtml;
-  window.__feishuNormalizeLatexTextBoundaries = normalizeLatexTextBoundaries;
-  window.__feishuNormalizeLatexHtmlTextNodes = normalizeLatexHtmlTextNodes;
-  window.__feishuSanitizeHtmlFragment = sanitizeHtmlFragment;
-  window.__feishuNormalizeListHtmlFragment = normalizeListHtmlFragment;
-  window.__feishuBuildClipboardHtml = buildClipboardHtml;
-  window.__feishuBuildClipboardPayload = buildClipboardPayload;
-  window.__feishuResolvePastePayload = resolvePastePayload;
-  window.__feishuPayloadRequiresPasteParsing = payloadRequiresPasteParsing;
-  window.__feishuShouldAutoDispatchPastePayload = shouldAutoDispatchPastePayload;
-  window.__feishuPreparePendingPasteForNativePaste = preparePendingPasteForNativePaste;
-  window.__feishuCaptureValidationSnapshot = captureValidationSnapshot;
-  window.__feishuInjectBase64Images = function () {
-    // This won't work from AppleScript's isolated world - use feishu-inject-images event instead
-    return 0;
-  };
-  window.__feishuGetImageInjectionStatus = function () {
+  }
+
+  function getImageInjectionStatus() {
     var needed = isImageInjectionNeeded();
     var editable = document.querySelector('[data-content-editable-root="true"], [contenteditable="true"]');
     var imageBlocks = editable ? editable.querySelectorAll('[data-block-type="image"]') : [];
     return { injectionNeeded: needed, imageBlockCount: imageBlocks.length };
-  };
-  window.__feishuExtractInsertionHtml = extractInsertionHtml;
-  window.__feishuInsertPayloadIntoEditor = insertPayloadIntoEditor;
-  window.__feishuDispatchPastePayload = dispatchPastePayload;
-  window.__feishuWriteClipboardPayload = writeClipboardPayload;
-  window.__feishuDebugEditorAPI = function () {
+  }
+
+  function debugEditorAPI() {
     var editorAPI = getEditorAPI();
     if (!editorAPI) {
       console.log('[Feishu Helper] no editorAPI');
@@ -5496,10 +5443,11 @@
     console.log('[Feishu Helper] editorAPI summary');
     console.log(summary);
     return summary;
-  };
-  window.__feishuCaptureNextCopy = function () {
-    if (window.__feishuCopyCaptureCleanup) {
-      try { window.__feishuCopyCaptureCleanup(); } catch (err) {}
+  }
+
+  function captureNextCopy() {
+    if (copyCaptureCleanup) {
+      try { copyCaptureCleanup(); } catch (err) {}
     }
 
     var capture = {
@@ -5552,14 +5500,14 @@
       if (clipboardRef && originalClipboardWrite) {
         try { clipboardRef.write = originalClipboardWrite; } catch (err) {}
       }
-      window.__feishuCopyCaptureCleanup = null;
+      copyCaptureCleanup = null;
     }
 
     function finalize(reason) {
       if (!active) return capture;
       capture.finalizedAt = new Date().toISOString();
       capture.reason = reason;
-      window.__feishuLastCopyCapture = capture;
+      lastCopyCapture = capture;
       cleanup();
       console.log('[Feishu Helper] copy capture');
       console.log(capture);
@@ -5662,8 +5610,8 @@
       finalize('timeout');
     }, 30000);
 
-    window.__feishuCopyCaptureCleanup = cleanup;
-    window.__feishuLastCopyCapture = null;
+    copyCaptureCleanup = cleanup;
+    lastCopyCapture = null;
     // Signal to DevTools that capture is armed (cross-isolated-world visibility)
     document.documentElement.setAttribute('data-feishu-copy-capture', JSON.stringify({ armed: true, armedAt: capture.armedAt, timeoutMs: 30000 }));
     console.log('[Feishu Helper] copy capture armed');
@@ -5671,8 +5619,9 @@
       armed: true,
       timeoutMs: 30000,
     };
-  };
-  window.__feishuDebugRichStyles = function () {
+  }
+
+  function debugRichStyles() {
     var ss = getStructService();
     if (!ss || !ss.rootBlock) {
       console.log('no rootBlock');
@@ -5780,8 +5729,9 @@
     console.log('[Feishu Helper] rich-style summary');
     console.log(summary);
     return summary;
-  };
-  window.__feishuDebugEquations = function () {
+  }
+
+  function debugEquations() {
     var ss = getStructService();
     if (!ss || !ss.rootBlock) { console.log('no rootBlock'); return; }
     var equations = [];
@@ -5818,5 +5768,96 @@
       });
     }
     return equations;
+  }
+
+  FeishuHelperModules = {
+    extraction: {
+      extractFullDoc: extractFullDoc,
+      duplicateDocument: duplicateDocument,
+      duplicateDocumentForAutomation: duplicateDocumentForAutomation,
+      preparePendingPasteForNativePaste: preparePendingPasteForNativePaste,
+      captureValidationSnapshot: captureValidationSnapshot,
+      getLastExtractionDebug: getLastExtractionDebug,
+      getEditorReadyState: getEditorReadyState,
+      exportDocumentAsHtml: exportDocumentAsHtml,
+    },
+    clipboard: {
+      buildClipboardPayload: buildClipboardPayload,
+      resolvePastePayload: resolvePastePayload,
+      payloadRequiresPasteParsing: payloadRequiresPasteParsing,
+      shouldAutoDispatchPastePayload: shouldAutoDispatchPastePayload,
+      writeClipboardPayload: writeClipboardPayload,
+      dispatchPastePayload: dispatchPastePayload,
+      insertPayloadIntoEditor: insertPayloadIntoEditor,
+      extractInsertionHtml: extractInsertionHtml,
+      pasteIntoDoc: pasteIntoDoc,
+    },
+    images: {
+      getImageConversionStatus: getImageConversionStatus,
+      resetImageConversionStatus: resetImageConversionStatus,
+      getImageInjectionStatus: getImageInjectionStatus,
+      uploadAllImages: uploadAllImages,
+      replaceTokensInDocxRecord: replaceTokensInDocxRecord,
+      injectBase64ImagesIntoEditor: injectBase64ImagesIntoEditor,
+    },
+    debug: {
+      getPendingPasteSummary: summarizePendingPasteForAutomation,
+      getPendingPasteTimestamp: getPendingPasteTimestamp,
+      getLastCopyCapture: getLastCopyCapture,
+      summarizeLastCopyCapture: summarizeLastCopyCapture,
+      inspectEditorPath: inspectEditorPath,
+      findEditorPaths: findEditorPaths,
+      debugEditorAPI: debugEditorAPI,
+      captureNextCopy: captureNextCopy,
+      debugRichStyles: debugRichStyles,
+      debugEquations: debugEquations,
+      getLastDocxRecord: function () {
+        return lastDocxRecord;
+      },
+    },
+    automation: {
+      runAutomationAction: runAutomationAction,
+      requestEvent: AUTOMATION_REQUEST_EVENT,
+      resultEvent: AUTOMATION_RESULT_EVENT,
+    },
   };
-})();
+
+  if (window.__feishuHelperRuntime) {
+    window.__feishuHelperRuntime.modules = FeishuHelperModules;
+  }
+
+  function runAutomationActionCompat(options) {
+    var action = typeof options === 'string'
+      ? options
+      : options && options.action;
+    return FeishuHelperModules.automation.runAutomationAction(action);
+  }
+
+  window.__tampermonkeyScriptDebugExports = function () {
+    return {
+      name: SCRIPT_NAME,
+      version: SCRIPT_VERSION,
+      automation: {
+        requestEvent: AUTOMATION_REQUEST_EVENT,
+        resultEvent: AUTOMATION_RESULT_EVENT,
+        defaultAction: 'duplicateDocument',
+        actions: ['duplicateDocument', 'realTestDuplicateDocument'],
+      },
+      exports: {
+        extractFullDoc: typeof FeishuHelperModules.extraction.extractFullDoc,
+        pasteIntoDoc: typeof FeishuHelperModules.clipboard.pasteIntoDoc,
+        preparePendingPasteForNativePaste: typeof FeishuHelperModules.extraction.preparePendingPasteForNativePaste,
+        captureValidationSnapshot: typeof FeishuHelperModules.extraction.captureValidationSnapshot,
+        getLastExtractionDebug: typeof FeishuHelperModules.extraction.getLastExtractionDebug,
+        getEditorReadyState: typeof FeishuHelperModules.extraction.getEditorReadyState,
+        debugEditorAPI: typeof FeishuHelperModules.debug.debugEditorAPI,
+        captureNextCopy: typeof FeishuHelperModules.debug.captureNextCopy,
+        runAutomationAction: typeof runAutomationActionCompat,
+      },
+    };
+  };
+  window.__feishuDebugExports = function () {
+    return window.__tampermonkeyScriptDebugExports();
+  };
+  window.__feishuRunAutomationAction = runAutomationActionCompat;
+  })();

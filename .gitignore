@@ -1,5 +1,6 @@
 node_modules/
 .worktrees/
+.DS_Store
 test-results/
 playwright-report/
 package-lock.json

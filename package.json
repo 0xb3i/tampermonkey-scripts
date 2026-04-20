@@ -4,8 +4,7 @@
   "description": "Collection of Tampermonkey userscripts",
   "private": true,
   "scripts": {
-    "test": "npx playwright test",
-    "test:headed": "npx playwright test --headed",
+    "test": "node --test ./tests/*.test.cjs",
     "tm:profile": "node scripts/feishu-helper-profile-runner.js",
     "tm:sync": "node scripts/feishu-helper-profile-runner.js --attach-active-chrome --sync-tampermonkey",
     "tm:action": "node scripts/feishu-helper-profile-runner.js --attach-active-chrome --sync-tampermonkey --real-test",
