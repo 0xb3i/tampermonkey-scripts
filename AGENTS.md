@@ -5,11 +5,12 @@
 - Tampermonkey 运行在隔离环境中，很多宿主页面或前端应用里的环境变量不能直接读取。
 - 如果脚本逻辑依赖这些值，不要假设可以直接从运行时环境里拿到；应先把所需数据写入页面可访问的 DOM 缓存，再从 DOM 缓存中读取。
 - 做功能设计时，优先考虑"油猴隔离环境 + 页面侧 DOM 可见数据"这条边界，不要把方案建立在 Node/构建时环境变量可直接透传到脚本的假设上。
+- **不要通过 `window.__feishu*` 等 window 全局函数暴露接口**：AppleScript 的 `execute javascript` 运行在 Chrome isolated world，无法访问 Tampermonkey 注入的 window 属性。跨上下文通信必须通过 DOM 属性（`document.documentElement.setAttribute('data-feishu-*', ...)`) 或 DOM 事件（`document.dispatchEvent(new CustomEvent('feishu-xxx', {detail: ...}))`)。
 - 当需要与外部工具/库协同时，优先通过 search 等方式查证真实 api 而不是臆测。
 
-## 飞书文档 1:1 复刻 — 最终方案与踩坑总结
+## 飞书文档 1:1 复刻
 
-### 最终方案（已验证可用）
+### 最终方案
 
 整体流程：**提取 → 上传图片 → 替换 token → 粘贴**
 
