@@ -120,3 +120,19 @@ test('userscript resolves wiki obj_token with the GET get_node endpoint', () => 
   assert.match(source, /\/space\/api\/wiki\/v2\/tree\/get_node\/\?wiki_token=/);
   assert.doesNotMatch(source, /_originalFetch\('\/space\/api\/wiki\/v2\/tree\/get_node\/', \{\s*method:\s*'POST'/);
 });
+
+test('userscript opts into Tampermonkey shared storage APIs for cross-subdomain pending paste sync', () => {
+  const source = fs.readFileSync(path.join(__dirname, '../scripts/feishu-helper.user.js'), 'utf8');
+  assert.match(source, /\/\/ @grant\s+GM_getValue/);
+  assert.match(source, /\/\/ @grant\s+GM_setValue/);
+  assert.match(source, /\/\/ @grant\s+GM_deleteValue/);
+  assert.match(source, /function getSharedPendingPaste\(/);
+  assert.match(source, /function setSharedPendingPaste\(/);
+});
+
+test('userscript clears stale uploaded token maps when a newer pending paste payload is loaded', () => {
+  const source = fs.readFileSync(path.join(__dirname, '../scripts/feishu-helper.user.js'), 'utf8');
+  assert.match(source, /var _uploadedTokenMapPendingTs = 0;/);
+  assert.match(source, /function ensureUploadedTokenMapMatchesPending\(/);
+  assert.match(source, /stale-uploaded-token-map-cleared/);
+});

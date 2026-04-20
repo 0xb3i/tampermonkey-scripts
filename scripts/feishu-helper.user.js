@@ -7,7 +7,10 @@
 // @match        https://*.feishu.cn/*
 // @match        https://*.larksuite.com/*
 // @match        https://*.larkoffice.com/*
-// @grant        none
+// @grant        GM_getValue
+// @grant        GM_setValue
+// @grant        GM_deleteValue
+// @sandbox      raw
 // @run-at       document-start
 // ==/UserScript==
 
@@ -2511,6 +2514,7 @@
   var DB_NAME = '__feishu_helper_db__';
   var DB_STORE = 'paste';
   var DB_KEY = 'pending';
+  var SHARED_PENDING_PASTE_KEY = '__feishu_helper_pending_paste__';
   var lastExtractionDebug = null;
   var imageConversionStatus = {
     state: 'idle',
@@ -2520,6 +2524,7 @@
     error: '',
   };
   var lastPendingPasteTimestamp = 0;
+  var _uploadedTokenMapPendingTs = 0;
 
   function updateImageConversionStatus(patch) {
     imageConversionStatus = Object.assign({}, imageConversionStatus, patch || {}, {
@@ -2552,6 +2557,63 @@
     return lastExtractionDebug ? Object.assign({}, lastExtractionDebug) : null;
   }
 
+  function clonePendingPasteData(data) {
+    if (!data || typeof data !== 'object') return null;
+    try {
+      return JSON.parse(JSON.stringify(data));
+    } catch (e) {
+      return null;
+    }
+  }
+
+  function isPendingPasteFresh(data) {
+    return !!(data && data.ts && Date.now() - data.ts < 3600000);
+  }
+
+  function canUseSharedPendingPasteStorage() {
+    return typeof GM_getValue === 'function' && typeof GM_setValue === 'function';
+  }
+
+  function getSharedPendingPaste() {
+    if (!canUseSharedPendingPasteStorage()) return null;
+    try {
+      var data = GM_getValue(SHARED_PENDING_PASTE_KEY, null);
+      return clonePendingPasteData(data);
+    } catch (e) {
+      return null;
+    }
+  }
+
+  function setSharedPendingPaste(data) {
+    if (!canUseSharedPendingPasteStorage()) return;
+    try {
+      GM_setValue(SHARED_PENDING_PASTE_KEY, clonePendingPasteData(data));
+    } catch (e) {}
+  }
+
+  function deleteSharedPendingPaste() {
+    if (typeof GM_deleteValue !== 'function') return;
+    try {
+      GM_deleteValue(SHARED_PENDING_PASTE_KEY);
+    } catch (e) {}
+  }
+
+  function clearUploadedTokenMap(reason) {
+    _uploadedTokenMap = {};
+    _uploadedTokenMapPendingTs = 0;
+    try {
+      document.documentElement.setAttribute('data-feishu-debug', reason || 'uploaded-token-map-cleared');
+    } catch (e) {}
+  }
+
+  function ensureUploadedTokenMapMatchesPending(pendingPaste) {
+    if (!pendingPaste || !_uploadedTokenMapPendingTs) return pendingPaste;
+    if (pendingPaste.ts && pendingPaste.ts > _uploadedTokenMapPendingTs) {
+      clearUploadedTokenMap('stale-uploaded-token-map-cleared');
+    }
+    return pendingPaste;
+  }
+
   function openDB() {
     return new Promise(function (resolve, reject) {
       var req = indexedDB.open(DB_NAME, 1);
@@ -2567,14 +2629,14 @@
   // Set by the runner after successfully uploading images to the target document.
   var _uploadedTokenMap = {};
 
-  function getPendingPaste() {
+  function getLocalPendingPaste() {
     return openDB().then(function (db) {
       return new Promise(function (resolve) {
         var tx = db.transaction(DB_STORE, 'readonly');
         var req = tx.objectStore(DB_STORE).get(DB_KEY);
         req.onsuccess = function () {
           var data = req.result;
-          if (data && data.ts && Date.now() - data.ts < 3600000) {
+          if (isPendingPasteFresh(data)) {
             resolve(data);
           } else {
             if (data) {
@@ -2589,22 +2651,55 @@
     }).catch(function () { return null; });
   }
 
-  function setPendingPaste(data) {
+  function setLocalPendingPaste(data) {
     return openDB().then(function (db) {
       return new Promise(function (resolve, reject) {
-        data.ts = Date.now();
-        lastPendingPasteTimestamp = data.ts;
-        // Write to a DOM attribute so AppleScript's execute javascript
-        // (which runs in a separate JS context) can read the value.
-        // window properties are NOT shared across Chrome's isolated worlds,
-        // but DOM attributes are.
-        try {
-          document.documentElement.setAttribute('data-feishu-pending-paste-ts', String(data.ts));
-        } catch (e) {}
         var tx = db.transaction(DB_STORE, 'readwrite');
         tx.objectStore(DB_STORE).put(data, DB_KEY);
         tx.oncomplete = function () { resolve(); };
         tx.onerror = function () { reject(tx.error); };
+      });
+    });
+  }
+
+  function getPendingPaste() {
+    return getLocalPendingPaste().then(function (localData) {
+      var sharedData = getSharedPendingPaste();
+      if (!isPendingPasteFresh(sharedData)) {
+        if (sharedData) deleteSharedPendingPaste();
+        sharedData = null;
+      }
+      var chosen = localData;
+      if (sharedData && (!chosen || Number(sharedData.ts || 0) > Number(chosen.ts || 0))) {
+        chosen = sharedData;
+      }
+      if (chosen && chosen !== localData) {
+        return setLocalPendingPaste(chosen).catch(function () {
+          return null;
+        }).then(function () {
+          return ensureUploadedTokenMapMatchesPending(chosen);
+        });
+      }
+      return ensureUploadedTokenMapMatchesPending(chosen);
+    }).catch(function () { return null; });
+  }
+
+  function setPendingPaste(data) {
+    return openDB().then(function () {
+      return new Promise(function (resolve, reject) {
+        data.ts = Date.now();
+        data.savedFromHost = location.host;
+        data.savedFromHref = location.href;
+        lastPendingPasteTimestamp = data.ts;
+        try {
+          document.documentElement.setAttribute('data-feishu-pending-paste-ts', String(data.ts));
+        } catch (e) {}
+        setSharedPendingPaste(data);
+        setLocalPendingPaste(data).then(function () {
+          resolve();
+        }).catch(function (error) {
+          reject(error);
+        });
       });
     }).catch(function () {});
   }
@@ -3968,6 +4063,7 @@
             Object.keys(tokenMap).forEach(function (key) {
               _uploadedTokenMap[key] = tokenMap[key];
             });
+            _uploadedTokenMapPendingTs = Date.now();
             // Update pendingPaste docxRecord with replaced tokens
             var origRecord = content.originalDocxRecordObj;
             if (origRecord) {
@@ -5115,6 +5211,7 @@
         Object.keys(tokenMap).forEach(function (key) {
           _uploadedTokenMap[key] = tokenMap[key];
         });
+        _uploadedTokenMapPendingTs = Date.now();
         document.documentElement.setAttribute('data-feishu-token-map-set',
           JSON.stringify({ count: Object.keys(_uploadedTokenMap).length }));
       }
@@ -5144,15 +5241,16 @@
           JSON.stringify({ error: 'no images provided' }));
         return;
       }
-      uploadAllImages(images).then(function (tokenMap) {
-        // Directly populate _uploadedTokenMap so the paste flow can use it
-        // without waiting for the runner to echo it back
-        Object.keys(tokenMap).forEach(function (key) {
-          _uploadedTokenMap[key] = tokenMap[key];
-        });
-        document.documentElement.setAttribute('data-feishu-upload-result',
-          JSON.stringify({ tokenMap: tokenMap, count: Object.keys(tokenMap).length }));
-      }).catch(function (err) {
+        uploadAllImages(images).then(function (tokenMap) {
+          // Directly populate _uploadedTokenMap so the paste flow can use it
+          // without waiting for the runner to echo it back
+          Object.keys(tokenMap).forEach(function (key) {
+            _uploadedTokenMap[key] = tokenMap[key];
+          });
+          _uploadedTokenMapPendingTs = Date.now();
+          document.documentElement.setAttribute('data-feishu-upload-result',
+            JSON.stringify({ tokenMap: tokenMap, count: Object.keys(tokenMap).length }));
+        }).catch(function (err) {
         document.documentElement.setAttribute('data-feishu-upload-result',
           JSON.stringify({ error: String(err && err.message || err) }));
       });
@@ -5177,6 +5275,7 @@
           Object.keys(tokenMap).forEach(function (key) {
             _uploadedTokenMap[key] = tokenMap[key];
           });
+          _uploadedTokenMapPendingTs = Date.now();
           // Also update the pendingPaste docxRecord with new tokens
           // so the next Cmd+Shift+P paste uses the valid tokens.
           var origRecord = pending && pending.originalDocxRecordObj;
