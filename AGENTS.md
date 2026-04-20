@@ -84,17 +84,24 @@ clipboard-service.instance 有 6 个格式处理器 (formats[0..5])：
 4. **docxRecord 递归遍历查找所有图片块**（2026-04-20）：
    - 之前只遍历 `recordIds`（页面直接子块），嵌套在 grid_column/callout/table_cell 中的图片块被遗漏（只找到 3/38）
    - 改为递归遍历 `snapshot.children`，找到所有 38 个图片块，token 匹配率 100%
+   - **进一步修复**：`snapshot.children` 递归仍遗漏表格内图片（38/40），改为直接遍历 `recordMap` 所有 key（与 `replaceTokensInDocxRecord` 一致），找到全部 40 个
 
-5. **图片占位符策略**（2026-04-20）：
+5. **表格内图片 base64 获取**（2026-04-20）：
+   - `blockToHtml` → `buildTableMatrix` → `collectTableCellParts` 只提取文本，不生成 `<img>` 标签
+   - 因此表格内图片的 token 不在 HTML 中，`convertImagesToBase64` 的 `tokenToBase64` 没有它们的映射
+   - 修复：对 `orderedImageBase64List` 中 base64 为空的图片，用 token 直接调 `/space/api/box/stream/download/preview/TOKEN` 下载
+   - `/download/all/?token=TOKEN` 对部分 token 返回 404，但 `/download/preview/TOKEN/?preview_type=16` 返回 200
+
+6. **图片占位符策略**（2026-04-20）：
    - `convertImagesToBase64` 将 HTML 中的 CDN 图片 URL 替换为 1x1 透明 PNG 占位符（而非完整 base64）
    - 剪贴板 HTML 从 ~8.7MB 缩小到 ~95KB，Feishu 可以正常处理
    - 完整 base64 数据存储在 IndexedDB 的 `orderedImageBase64List` 中，用于粘贴后注入
 
-6. **feishu-inject-images 事件**（2026-04-20）：
+7. **feishu-inject-images 事件**（2026-04-20）：
    - 新增 DOM 事件，供 AppleScript JS 上下文触发图片注入
    - 从 IndexedDB 读取 `orderedImageBase64List`，避免 DOM 属性大小限制
 
-7. **mount_point=docx_image 图片上传到目标文档**（2026-04-20）：
+8. **mount_point=docx_image 图片上传到目标文档**（2026-04-20）：
    - 发现 `mount_point=docx_image` 是飞书内部上传 API 的正确参数（非 `ccm_import`）
    - 完整流程：上传 base64 图片到目标文档 → 获取 file_token → 替换 docxRecord 中的 image.token → 粘贴完整 docxRecord → 结构和图片同时 1:1 还原
    - `mount_node_token` 必须使用 obj_token（wiki 页面需通过 `/space/api/wiki/v2/tree/get_node/` 解析）
