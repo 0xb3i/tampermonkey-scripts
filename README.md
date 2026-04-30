@@ -154,4 +154,3 @@ agent-browser connect 9222
 
 - `scripts/tampermonkey-cdp-utils.cjs` 提供了基于 CDP 的通用同步能力，可被不同 userscript 的自动化验证复用。
 - 当前 `scripts/copy-cleaner-chatgpt-runner.js` 已经使用这套通用同步逻辑；后续其他脚本也应优先复用这里。
-
