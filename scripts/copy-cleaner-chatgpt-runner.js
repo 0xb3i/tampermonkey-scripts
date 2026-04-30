@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 
+const { readFileSync } = require('fs');
 const { resolve } = require('path');
 
 const {
@@ -39,6 +40,16 @@ function parseCliArgs(argv) {
 
 function normalizeText(text) {
   return String(text || '').replace(/\r\n?/g, '\n').trim();
+}
+
+function readDebugServerUrl() {
+  try {
+    var envText = readFileSync(resolve(__dirname, '../.dbg/chatgpt-copy-cleaner.env'), 'utf8');
+    var match = envText.match(/^DEBUG_SERVER_URL=(.+)$/m);
+    return match ? match[1].trim() : '';
+  } catch (error) {
+    return '';
+  }
 }
 
 async function ensureClipboardPermission(context, origin) {
@@ -132,11 +143,19 @@ async function validateChatGPTCopyButton(page, options) {
   var expectedText = options && options.expectedText ? String(options.expectedText) : DEFAULT_EXPECTED_TEXT;
   await sendPrompt(page, promptText);
   var clickedTarget = await clickLatestCopyButton(page);
+  await page.waitForTimeout(300);
   var clipboardText = normalizeText(await readClipboardText(page));
+  var pageMarker = normalizeText(await page.evaluate(function () {
+    return document.documentElement.getAttribute('data-copy-cleaner-chatgpt-copy') || '';
+  }));
+  if (expectedText === '__debug_placeholder__' && pageMarker) {
+    expectedText = pageMarker;
+  }
   return {
     promptText: promptText,
     expectedText: expectedText,
     clickedTarget: clickedTarget,
+    pageMarker: pageMarker,
     clipboardText: clipboardText,
     matches: clipboardText === expectedText,
   };
@@ -149,6 +168,7 @@ async function main() {
   var targetUrl = args.url || DEFAULT_URL;
   var promptText = args.prompt || DEFAULT_PROMPT;
   var expectedText = args.expected || DEFAULT_EXPECTED_TEXT;
+  var debugServerUrl = readDebugServerUrl();
 
   var browser = await connectToChromeOverCDP(endpointUrl);
   try {
@@ -166,6 +186,11 @@ async function main() {
     await navigateCurrentTab(page, targetUrl);
     await ensureClipboardPermission(context, new URL(targetUrl).origin);
     await page.reload({ waitUntil: 'domcontentloaded' });
+    if (debugServerUrl) {
+      await page.evaluate(function (url) {
+        document.documentElement.setAttribute('data-copy-cleaner-debug-url', url);
+      }, debugServerUrl);
+    }
     console.log('[copy-cleaner-chatgpt-runner] page:ready');
 
     console.log('[copy-cleaner-chatgpt-runner] validate:start');

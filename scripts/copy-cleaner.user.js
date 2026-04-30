@@ -15,6 +15,57 @@
 (function () {
   'use strict';
 
+  // #region debug-point A:report-event
+  function reportDebugEvent(hypothesisId, debugLocation, msg, data) {
+    if (!/https:\/\/chatgpt\.com\//.test(String(window.location && window.location.href || ''))) return;
+    var debugServerUrl = (function () {
+      try {
+        return document.documentElement.getAttribute('data-copy-cleaner-debug-url') || 'http://127.0.0.1:7777/event';
+      } catch (error) {
+        return 'http://127.0.0.1:7777/event';
+      }
+    })();
+    var debugSessionId = (function () {
+      try {
+        return document.documentElement.getAttribute('data-copy-cleaner-debug-session') || 'chatgpt-copy-cleaner';
+      } catch (error) {
+        return 'chatgpt-copy-cleaner';
+      }
+    })();
+    var debugRunId = (function () {
+      try {
+        return document.documentElement.getAttribute('data-copy-cleaner-debug-run') || 'pre-fix';
+      } catch (error) {
+        return 'pre-fix';
+      }
+    })();
+    fetch(debugServerUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        sessionId: debugSessionId,
+        runId: debugRunId,
+        hypothesisId: hypothesisId,
+        location: debugLocation,
+        msg: msg,
+        data: data || {},
+        ts: Date.now(),
+      }),
+    }).catch(function () {});
+  }
+  // #endregion
+
+  // #region debug-point A:boot
+  try {
+    document.documentElement.setAttribute('data-copy-cleaner-active', '1');
+    document.documentElement.setAttribute('data-copy-cleaner-version', '5.0.0');
+  } catch (error) {}
+  reportDebugEvent('A', 'copy-cleaner.user.js:boot', '[DEBUG] copy cleaner booted', {
+    href: String(window.location && window.location.href || ''),
+    readyState: String(document.readyState || ''),
+  });
+  // #endregion
+
   function cleanText(text, options) {
     options = options || {};
     var parts = splitByLatex(text);
@@ -223,17 +274,27 @@
   }
 
   function getKatexLatexData(katexEl) {
-    if (katexEl.hasAttribute('data-latex-display')) {
-      return { latex: katexEl.getAttribute('data-latex-display'), isDisplay: true };
-    }
-    if (katexEl.hasAttribute('data-latex')) {
-      return { latex: katexEl.getAttribute('data-latex'), isDisplay: false };
-    }
     var annotation = katexEl.querySelector('.katex-mathml annotation');
-    if (!annotation) return null;
+    var annotationLatex = annotation ? annotation.textContent : '';
+    var isDisplay = katexEl.hasAttribute('data-latex-display') || katexEl.closest('.katex-display') !== null;
+    var displayLatex = katexEl.getAttribute('data-latex-display') || '';
+    if (isDisplay && (displayLatex || annotationLatex)) {
+      return {
+        latex: annotationLatex.length > displayLatex.length ? annotationLatex : displayLatex,
+        isDisplay: true,
+      };
+    }
+    var inlineLatex = katexEl.getAttribute('data-latex') || '';
+    if (inlineLatex || annotationLatex) {
+      return {
+        latex: annotationLatex.length > inlineLatex.length ? annotationLatex : inlineLatex,
+        isDisplay: false,
+      };
+    }
+    if (!annotationLatex) return null;
     return {
-      latex: annotation.textContent,
-      isDisplay: katexEl.closest('.katex-display') !== null,
+      latex: annotationLatex,
+      isDisplay: isDisplay,
     };
   }
 
@@ -255,17 +316,12 @@
   }
 
   function getMathJaxLatexData(el) {
-    var latex = el.getAttribute('data-latex-display') || el.getAttribute('data-latex');
-    if (latex) {
-      return {
-        latex: latex,
-        isDisplay: el.hasAttribute('data-latex-display') || el.classList.contains('MathJax_Display') || el.classList.contains('mathjax-display'),
-      };
-    }
     var annotation = el.querySelector('math annotation');
-    if (!annotation) return null;
+    var annotationLatex = annotation ? annotation.textContent : '';
+    var attrLatex = el.getAttribute('data-latex-display') || el.getAttribute('data-latex') || '';
+    if (!attrLatex && !annotationLatex) return null;
     return {
-      latex: annotation.textContent,
+      latex: annotationLatex.length > attrLatex.length ? annotationLatex : attrLatex,
       isDisplay: el.getAttribute('display') === 'true' || el.hasAttribute('display'),
     };
   }
@@ -503,8 +559,28 @@
     if (node.tagName === 'LI') {
       appendStructuredLineBreak(state);
       appendStructuredText(state, getListItemPrefix(node.parentElement, getListItemIndex(node)));
+      var inlineParts = [];
+      var nestedBlocks = [];
       for (var listChild = node.firstChild; listChild; listChild = listChild.nextSibling) {
-        serializeStructuredNode(listChild, state);
+        if (listChild.nodeType === Node.ELEMENT_NODE && /^(UL|OL)$/.test(listChild.tagName)) {
+          nestedBlocks.push(listChild);
+          continue;
+        }
+        if (listChild.nodeType === Node.ELEMENT_NODE && listChild.tagName === 'P') {
+          appendInlineText(inlineParts, getInlineNodeText(listChild, { lineBreakToken: ' ' }));
+          continue;
+        }
+        if (listChild.nodeType === Node.ELEMENT_NODE && isBlockElement(listChild)) {
+          nestedBlocks.push(listChild);
+          continue;
+        }
+        serializeInlineNode(listChild, inlineParts, { lineBreakToken: ' ' });
+      }
+      if (inlineParts.length) {
+        appendStructuredText(state, inlineParts.join('').trim());
+      }
+      for (var nestedIndex = 0; nestedIndex < nestedBlocks.length; nestedIndex++) {
+        serializeStructuredNode(nestedBlocks[nestedIndex], state);
       }
       appendStructuredLineBreak(state);
       return;
@@ -672,6 +748,14 @@
       var originalWriteText = Clipboard.prototype.writeText;
       Object.defineProperty(Clipboard.prototype, 'writeText', {
         value: function (text) {
+          // #region debug-point B:clipboard-writeText
+          reportDebugEvent('B', 'copy-cleaner.user.js:writeText', '[DEBUG] Clipboard.writeText intercepted', {
+            href: String(location.href || ''),
+            originalText: String(text || '').slice(0, 500),
+            bypass: shouldBypassClipboardClean,
+            cleanedText: shouldBypassClipboardClean ? String(text || '').slice(0, 500) : String(cleanText(text) || '').slice(0, 500),
+          });
+          // #endregion
           if (shouldBypassClipboardClean) {
             return originalWriteText.call(this, text);
           }
@@ -687,6 +771,18 @@
       var originalWrite = Clipboard.prototype.write;
       Object.defineProperty(Clipboard.prototype, 'write', {
         value: function (items) {
+          // #region debug-point C:clipboard-write
+          try {
+            reportDebugEvent('C', 'copy-cleaner.user.js:write', '[DEBUG] Clipboard.write intercepted', {
+              href: String(location.href || ''),
+              itemCount: items && typeof items.length === 'number' ? items.length : null,
+              itemTypes: Array.prototype.map.call(items || [], function (item) {
+                return item && item.types ? Array.prototype.slice.call(item.types) : [];
+              }),
+              bypass: shouldBypassClipboardClean,
+            });
+          } catch (error) {}
+          // #endregion
           var newItems = [];
           for (var item of items) {
             var newItem = {};
@@ -695,6 +791,14 @@
                 newItem[type] = item.getType(type).then(function (blob) {
                   return blob.text();
                 }).then(function (text) {
+                  // #region debug-point C:clipboard-write-plain-text
+                  reportDebugEvent('C', 'copy-cleaner.user.js:write:text/plain', '[DEBUG] Clipboard.write text/plain observed', {
+                    href: String(location.href || ''),
+                    originalText: String(text || '').slice(0, 500),
+                    bypass: shouldBypassClipboardClean,
+                    cleanedText: shouldBypassClipboardClean ? String(text || '').slice(0, 500) : String(cleanText(text) || '').slice(0, 500),
+                  });
+                  // #endregion
                   if (shouldBypassClipboardClean) {
                     return new Blob([text], { type: 'text/plain' });
                   }
@@ -719,6 +823,15 @@
 
   function onCopy(e) {
     var payload = buildClipboardPayloadFromSelection(window.getSelection());
+    // #region debug-point D:copy-event
+    reportDebugEvent('D', 'copy-cleaner.user.js:onCopy', '[DEBUG] copy event observed', {
+      href: String(location.href || ''),
+      hasClipboardData: !!(e && e.clipboardData),
+      selectionText: String(window.getSelection && window.getSelection() ? window.getSelection().toString() : '').slice(0, 500),
+      payloadText: payload && payload.text ? String(payload.text).slice(0, 500) : '',
+      intercepted: !!(payload && e && e.clipboardData),
+    });
+    // #endregion
     if (!payload || !e.clipboardData) return;
 
     e.preventDefault();
@@ -742,6 +855,97 @@
       }).catch(function () {});
     }
   }
+
+  function findChatGptAssistantCopyButton(target) {
+    if (!target || !target.closest || !/https:\/\/chatgpt\.com\//.test(String(window.location && window.location.href || ''))) {
+      return null;
+    }
+    var button = target.closest('button[data-testid="copy-turn-action-button"]');
+    if (!button) return null;
+    var turn = button.closest('[data-turn], [data-testid^="conversation-turn-"]');
+    var dataTurn = turn ? String(turn.getAttribute('data-turn') || '') : '';
+    var ariaLabel = String(button.getAttribute('aria-label') || '');
+    if (dataTurn === 'assistant') return button;
+    if (/复制回复|copy response/i.test(ariaLabel)) return button;
+    return null;
+  }
+
+  function getChatGptAssistantContentRoot(button) {
+    if (!button || !button.closest) return '';
+    var turn = button.closest('[data-turn], [data-testid^="conversation-turn-"]');
+    if (!turn || !turn.querySelector) return null;
+    return turn.querySelector('[data-message-author-role="assistant"] .markdown')
+      || turn.querySelector('[data-message-author-role="assistant"]')
+      || turn;
+  }
+
+  function buildClipboardPayloadFromRoot(root) {
+    if (!root || !root.cloneNode) return null;
+    var fragment = document.createDocumentFragment();
+    fragment.appendChild(root.cloneNode(true));
+    // #region debug-point F:root-before-extract
+    reportDebugEvent('F', 'copy-cleaner.user.js:buildClipboardPayloadFromRoot:before', '[DEBUG] ChatGPT root snapshot before extract', {
+      rootHtml: root.innerHTML.slice(0, 4000),
+      displayLatexAttrs: Array.prototype.map.call(root.querySelectorAll('.katex[data-latex-display]'), function (el) {
+        return String(el.getAttribute('data-latex-display') || '').slice(0, 300);
+      }).slice(0, 8),
+      displayAnnotations: Array.prototype.map.call(root.querySelectorAll('.katex .katex-mathml annotation'), function (el) {
+        return String(el.textContent || '').slice(0, 300);
+      }).slice(0, 8),
+    });
+    // #endregion
+    extractLatexFromKatex(fragment);
+    extractLatexFromMathJax(fragment);
+    var text = serializeStructuredFragment(fragment);
+    if (!text) {
+      text = cleanText(fragment.textContent || '');
+    }
+    // #region debug-point G:payload-after-extract
+    reportDebugEvent('G', 'copy-cleaner.user.js:buildClipboardPayloadFromRoot:after', '[DEBUG] ChatGPT payload built from root', {
+      payloadText: String(text || '').slice(0, 4000),
+      latexMatches: String(text || '').match(/\$\$[\s\S]*?\$\$|\$[^$\n]+?\$/g) || [],
+    });
+    // #endregion
+    return text ? { text: text } : null;
+  }
+
+  function onChatGptCopyButtonClick(e) {
+    var button = findChatGptAssistantCopyButton(e.target);
+    if (!button) return;
+
+    var contentRoot = getChatGptAssistantContentRoot(button);
+    var payload = buildClipboardPayloadFromRoot(contentRoot);
+    if (!payload || !payload.text) return;
+
+    // #region debug-point E:chatgpt-copy-button
+    reportDebugEvent('E', 'copy-cleaner.user.js:onChatGptCopyButtonClick', '[DEBUG] ChatGPT assistant copy button intercepted', {
+      href: String(window.location && window.location.href || ''),
+      rootTag: contentRoot && contentRoot.tagName ? contentRoot.tagName : '',
+      rootClass: contentRoot && contentRoot.className ? String(contentRoot.className).slice(0, 200) : '',
+      cleanedText: payload.text.slice(0, 1000),
+      containsLatex: /\$\$[\s\S]*\$\$|\$[^$\n]+\$/.test(payload.text),
+    });
+    // #endregion
+
+    e.preventDefault();
+    e.stopImmediatePropagation();
+
+    withClipboardCleanBypass(function () {
+      return navigator.clipboard.writeText(payload.text);
+    }).then(function () {
+      // #region debug-point H:clipboard-after-write
+      reportDebugEvent('H', 'copy-cleaner.user.js:onChatGptCopyButtonClick:afterWrite', '[DEBUG] ChatGPT payload written to clipboard', {
+        payloadText: String(payload.text || '').slice(0, 4000),
+      });
+      // #endregion
+      try {
+        document.documentElement.setAttribute('data-copy-cleaner-chatgpt-copy', payload.text);
+        document.documentElement.setAttribute('data-copy-cleaner-chatgpt-copy-length', String(payload.text.length));
+      } catch (error) {}
+    }).catch(function () {});
+  }
+
   window.addEventListener('copy', onCopy, true);
   window.addEventListener('keydown', onKeydown, true);
+  window.addEventListener('click', onChatGptCopyButtonClick, true);
 })();
