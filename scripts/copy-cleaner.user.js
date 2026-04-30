@@ -17,34 +17,20 @@
 
   // #region debug-point A:report-event
   function reportDebugEvent(hypothesisId, debugLocation, msg, data) {
-    if (!/https:\/\/chatgpt\.com\//.test(String(window.location && window.location.href || ''))) return;
+    if (!/https:\/\/mira\.byteintl\.net\//.test(String(window.location && window.location.href || ''))) return;
     var debugServerUrl = (function () {
       try {
-        return document.documentElement.getAttribute('data-copy-cleaner-debug-url') || 'http://127.0.0.1:7777/event';
+        return document.documentElement.getAttribute('data-copy-cleaner-debug-url') || 'http://127.0.0.1:7779/event';
       } catch (error) {
-        return 'http://127.0.0.1:7777/event';
-      }
-    })();
-    var debugSessionId = (function () {
-      try {
-        return document.documentElement.getAttribute('data-copy-cleaner-debug-session') || 'chatgpt-copy-cleaner';
-      } catch (error) {
-        return 'chatgpt-copy-cleaner';
-      }
-    })();
-    var debugRunId = (function () {
-      try {
-        return document.documentElement.getAttribute('data-copy-cleaner-debug-run') || 'pre-fix';
-      } catch (error) {
-        return 'pre-fix';
+        return 'http://127.0.0.1:7779/event';
       }
     })();
     fetch(debugServerUrl, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        sessionId: debugSessionId,
-        runId: debugRunId,
+        sessionId: 'mira-double-breaks',
+        runId: 'pre-fix',
         hypothesisId: hypothesisId,
         location: debugLocation,
         msg: msg,
@@ -53,17 +39,6 @@
       }),
     }).catch(function () {});
   }
-  // #endregion
-
-  // #region debug-point A:boot
-  try {
-    document.documentElement.setAttribute('data-copy-cleaner-active', '1');
-    document.documentElement.setAttribute('data-copy-cleaner-version', '5.0.0');
-  } catch (error) {}
-  reportDebugEvent('A', 'copy-cleaner.user.js:boot', '[DEBUG] copy cleaner booted', {
-    href: String(window.location && window.location.href || ''),
-    readyState: String(document.readyState || ''),
-  });
   // #endregion
 
   function cleanText(text, options) {
@@ -142,6 +117,28 @@
     }
 
     return result;
+  }
+
+  function looksLikeMarkdownCopy(text) {
+    if (!text) return false;
+    var doubleBreaks = (text.match(/\n\n/g) || []).length;
+    if (doubleBreaks < 8) return false;
+    return /(^|\n)(#{1,6}\s|[-*]\s|\d+\.\s|>\s|```|---\s*$)/m.test(text);
+  }
+
+  function compactMarkdownBlankLines(text) {
+    var parts = String(text || '').split(/(```[\s\S]*?```)/g);
+    for (var i = 0; i < parts.length; i += 2) {
+      parts[i] = parts[i].replace(/\n{2,}/g, '\n');
+    }
+    return parts.join('');
+  }
+
+  function normalizeClipboardText(text) {
+    var cleaned = cleanText(text);
+    return looksLikeMarkdownCopy(cleaned)
+      ? compactMarkdownBlankLines(cleaned)
+      : cleaned;
   }
 
   var LATEX_DELIMITERS = {
@@ -711,23 +708,55 @@
     var rawText = selection.toString();
     var latexPayload = resolveLatexSelectionPayload(selection);
     if (latexPayload !== null) {
-      return {
+      var latexResult = {
         text: latexPayload.alreadyStructured ? latexPayload.text : cleanText(latexPayload.text),
       };
+      // #region debug-point B:selection-latex-payload
+      reportDebugEvent('B', 'copy-cleaner.user.js:buildClipboardPayloadFromSelection:latex', '[DEBUG] selection latex payload built', {
+        rawLength: rawText.length,
+        payloadLength: latexResult.text.length,
+        rawTripleBreaks: (rawText.match(/\n{3,}/g) || []).length,
+        payloadTripleBreaks: (latexResult.text.match(/\n{3,}/g) || []).length,
+        payloadPreview: latexResult.text.slice(0, 800),
+      });
+      // #endregion
+      return latexResult;
     }
 
     var structuredText = extractStructuredSelectionText(selection);
     if (structuredText !== null) {
-      return structuredText.text !== rawText
+      var structuredResult = structuredText.text !== rawText
         ? { text: structuredText.text }
         : null;
+      // #region debug-point B:selection-structured-payload
+      reportDebugEvent('B', 'copy-cleaner.user.js:buildClipboardPayloadFromSelection:structured', '[DEBUG] selection structured payload built', {
+        rawLength: rawText.length,
+        structuredLength: structuredText.text.length,
+        rawTripleBreaks: (rawText.match(/\n{3,}/g) || []).length,
+        structuredTripleBreaks: (structuredText.text.match(/\n{3,}/g) || []).length,
+        structuredPreview: structuredText.text.slice(0, 800),
+        changed: !!structuredResult,
+      });
+      // #endregion
+      return structuredResult;
     }
 
     if (!rawText) return null;
     var cleanedText = cleanText(rawText);
-    return cleanedText !== rawText
+    var plainResult = cleanedText !== rawText
       ? { text: cleanedText }
       : null;
+    // #region debug-point B:selection-plain-payload
+    reportDebugEvent('B', 'copy-cleaner.user.js:buildClipboardPayloadFromSelection:plain', '[DEBUG] selection plain payload built', {
+      rawLength: rawText.length,
+      cleanedLength: cleanedText.length,
+      rawTripleBreaks: (rawText.match(/\n{3,}/g) || []).length,
+      cleanedTripleBreaks: (cleanedText.match(/\n{3,}/g) || []).length,
+      cleanedPreview: cleanedText.slice(0, 800),
+      changed: !!plainResult,
+    });
+    // #endregion
+    return plainResult;
   }
 
   var shouldBypassClipboardClean = false;
@@ -753,18 +782,20 @@
       var originalWriteText = Clipboard.prototype.writeText;
       Object.defineProperty(Clipboard.prototype, 'writeText', {
         value: function (text) {
-          // #region debug-point B:clipboard-writeText
-          reportDebugEvent('B', 'copy-cleaner.user.js:writeText', '[DEBUG] Clipboard.writeText intercepted', {
-            href: String(location.href || ''),
-            originalText: String(text || '').slice(0, 500),
+          // #region debug-point C:clipboard-writeText
+          reportDebugEvent('C', 'copy-cleaner.user.js:writeText', '[DEBUG] Clipboard.writeText intercepted', {
+            originalLength: String(text || '').length,
+            originalTripleBreaks: (String(text || '').match(/\n{3,}/g) || []).length,
+            cleanedLength: shouldBypassClipboardClean ? String(text || '').length : normalizeClipboardText(text).length,
+            cleanedTripleBreaks: shouldBypassClipboardClean ? (String(text || '').match(/\n{3,}/g) || []).length : (normalizeClipboardText(text).match(/\n{3,}/g) || []).length,
             bypass: shouldBypassClipboardClean,
-            cleanedText: shouldBypassClipboardClean ? String(text || '').slice(0, 500) : String(cleanText(text) || '').slice(0, 500),
+            preview: String(text || '').slice(0, 800),
           });
           // #endregion
           if (shouldBypassClipboardClean) {
             return originalWriteText.call(this, text);
           }
-          return originalWriteText.call(this, cleanText(text));
+          return originalWriteText.call(this, normalizeClipboardText(text));
         },
         writable: true,
         configurable: true,
@@ -776,17 +807,46 @@
       var originalWrite = Clipboard.prototype.write;
       Object.defineProperty(Clipboard.prototype, 'write', {
         value: function (items) {
-          // #region debug-point C:clipboard-write
+          // #region debug-point B:clipboard-write
           try {
-            reportDebugEvent('C', 'copy-cleaner.user.js:write', '[DEBUG] Clipboard.write intercepted', {
-              href: String(location.href || ''),
-              itemCount: items && typeof items.length === 'number' ? items.length : null,
-              itemTypes: Array.prototype.map.call(items || [], function (item) {
-                return item && item.types ? Array.prototype.slice.call(item.types) : [];
-              }),
-              bypass: shouldBypassClipboardClean,
+            Promise.all(Array.from(items || []).map(function (item) {
+              return Promise.all(Array.from(item.types || []).map(function (type) {
+                return item.getType(type).then(function (blob) {
+                  return type === 'text/plain'
+                    ? blob.text().then(function (text) {
+                      return {
+                        type: type,
+                        size: blob.size,
+                        textLength: String(text || '').length,
+                        doubleBreaks: (String(text || '').match(/\n\n/g) || []).length,
+                        tripleBreaks: (String(text || '').match(/\n{3,}/g) || []).length,
+                        preview: String(text || '').slice(0, 400),
+                      };
+                    })
+                    : {
+                      type: type,
+                      size: blob.size,
+                    };
+                }).catch(function (error) {
+                  return {
+                    type: type,
+                    error: String(error && error.message || error || ''),
+                  };
+                });
+              }));
+            })).then(function (itemDetails) {
+              reportDebugEvent('B', 'copy-cleaner.user.js:write', '[DEBUG] Clipboard.write intercepted', {
+                bypass: shouldBypassClipboardClean,
+                itemCount: Array.from(items || []).length,
+                itemDetails: itemDetails,
+              });
             });
-          } catch (error) {}
+          } catch (error) {
+            reportDebugEvent('B', 'copy-cleaner.user.js:write', '[DEBUG] Clipboard.write inspection failed', {
+              bypass: shouldBypassClipboardClean,
+              error: String(error && error.message || error || ''),
+            });
+          }
           // #endregion
           var newItems = [];
           for (var item of items) {
@@ -796,18 +856,10 @@
                 newItem[type] = item.getType(type).then(function (blob) {
                   return blob.text();
                 }).then(function (text) {
-                  // #region debug-point C:clipboard-write-plain-text
-                  reportDebugEvent('C', 'copy-cleaner.user.js:write:text/plain', '[DEBUG] Clipboard.write text/plain observed', {
-                    href: String(location.href || ''),
-                    originalText: String(text || '').slice(0, 500),
-                    bypass: shouldBypassClipboardClean,
-                    cleanedText: shouldBypassClipboardClean ? String(text || '').slice(0, 500) : String(cleanText(text) || '').slice(0, 500),
-                  });
-                  // #endregion
                   if (shouldBypassClipboardClean) {
                     return new Blob([text], { type: 'text/plain' });
                   }
-                  return new Blob([cleanText(text)], { type: 'text/plain' });
+                  return new Blob([normalizeClipboardText(text)], { type: 'text/plain' });
                 });
               } else {
                 newItem[type] = item.getType(type);
@@ -830,10 +882,11 @@
     var payload = buildClipboardPayloadFromSelection(window.getSelection());
     // #region debug-point D:copy-event
     reportDebugEvent('D', 'copy-cleaner.user.js:onCopy', '[DEBUG] copy event observed', {
-      href: String(location.href || ''),
       hasClipboardData: !!(e && e.clipboardData),
-      selectionText: String(window.getSelection && window.getSelection() ? window.getSelection().toString() : '').slice(0, 500),
-      payloadText: payload && payload.text ? String(payload.text).slice(0, 500) : '',
+      selectionLength: String(window.getSelection && window.getSelection() ? window.getSelection().toString() : '').length,
+      payloadLength: payload && payload.text ? payload.text.length : 0,
+      payloadTripleBreaks: payload && payload.text ? (payload.text.match(/\n{3,}/g) || []).length : 0,
+      payloadPreview: payload && payload.text ? payload.text.slice(0, 800) : '',
       intercepted: !!(payload && e && e.clipboardData),
     });
     // #endregion
@@ -841,7 +894,7 @@
 
     e.preventDefault();
     e.stopImmediatePropagation();
-    e.clipboardData.setData('text/plain', payload.text);
+    e.clipboardData.setData('text/plain', normalizeClipboardText(payload.text));
   }
 
   function onKeydown(e) {
@@ -888,29 +941,12 @@
     if (!root || !root.cloneNode) return null;
     var fragment = document.createDocumentFragment();
     fragment.appendChild(root.cloneNode(true));
-    // #region debug-point F:root-before-extract
-    reportDebugEvent('F', 'copy-cleaner.user.js:buildClipboardPayloadFromRoot:before', '[DEBUG] ChatGPT root snapshot before extract', {
-      rootHtml: root.innerHTML.slice(0, 4000),
-      displayLatexAttrs: Array.prototype.map.call(root.querySelectorAll('.katex[data-latex-display]'), function (el) {
-        return String(el.getAttribute('data-latex-display') || '').slice(0, 300);
-      }).slice(0, 8),
-      displayAnnotations: Array.prototype.map.call(root.querySelectorAll('.katex .katex-mathml annotation'), function (el) {
-        return String(el.textContent || '').slice(0, 300);
-      }).slice(0, 8),
-    });
-    // #endregion
     extractLatexFromKatex(fragment);
     extractLatexFromMathJax(fragment);
     var text = serializeStructuredFragment(fragment);
     if (!text) {
       text = cleanText(fragment.textContent || '');
     }
-    // #region debug-point G:payload-after-extract
-    reportDebugEvent('G', 'copy-cleaner.user.js:buildClipboardPayloadFromRoot:after', '[DEBUG] ChatGPT payload built from root', {
-      payloadText: String(text || '').slice(0, 4000),
-      latexMatches: String(text || '').match(/\$\$[\s\S]*?\$\$|\$[^$\n]+?\$/g) || [],
-    });
-    // #endregion
     return text ? { text: text } : null;
   }
 
@@ -922,27 +958,12 @@
     var payload = buildClipboardPayloadFromRoot(contentRoot);
     if (!payload || !payload.text) return;
 
-    // #region debug-point E:chatgpt-copy-button
-    reportDebugEvent('E', 'copy-cleaner.user.js:onChatGptCopyButtonClick', '[DEBUG] ChatGPT assistant copy button intercepted', {
-      href: String(window.location && window.location.href || ''),
-      rootTag: contentRoot && contentRoot.tagName ? contentRoot.tagName : '',
-      rootClass: contentRoot && contentRoot.className ? String(contentRoot.className).slice(0, 200) : '',
-      cleanedText: payload.text.slice(0, 1000),
-      containsLatex: /\$\$[\s\S]*\$\$|\$[^$\n]+\$/.test(payload.text),
-    });
-    // #endregion
-
     e.preventDefault();
     e.stopImmediatePropagation();
 
     withClipboardCleanBypass(function () {
       return navigator.clipboard.writeText(payload.text);
     }).then(function () {
-      // #region debug-point H:clipboard-after-write
-      reportDebugEvent('H', 'copy-cleaner.user.js:onChatGptCopyButtonClick:afterWrite', '[DEBUG] ChatGPT payload written to clipboard', {
-        payloadText: String(payload.text || '').slice(0, 4000),
-      });
-      // #endregion
       try {
         document.documentElement.setAttribute('data-copy-cleaner-chatgpt-copy', payload.text);
         document.documentElement.setAttribute('data-copy-cleaner-chatgpt-copy-length', String(payload.text.length));
@@ -950,7 +971,45 @@
     }).catch(function () {});
   }
 
+  function isMiraCopyControlTarget(target) {
+    if (!target || !target.closest || !/https:\/\/mira\.byteintl\.net\//.test(String(window.location && window.location.href || ''))) {
+      return null;
+    }
+    var candidates = [];
+    var node = target.nodeType === Node.ELEMENT_NODE ? target : target.parentElement;
+    for (; node && candidates.length < 6; node = node.parentElement) {
+      candidates.push(node);
+    }
+    for (var i = 0; i < candidates.length; i++) {
+      var el = candidates[i];
+      var summary = [
+        String(el.innerText || '').trim(),
+        String(el.getAttribute && el.getAttribute('aria-label') || '').trim(),
+        String(el.getAttribute && el.getAttribute('title') || '').trim(),
+        String(el.getAttribute && el.getAttribute('data-tooltip') || '').trim(),
+      ].join(' ');
+      if (/copy/i.test(summary)) return el;
+    }
+    return null;
+  }
+
+  function onMiraCopyButtonClick(e) {
+    var button = isMiraCopyControlTarget(e.target);
+    if (!button) return;
+    // #region debug-point E:mira-click
+    reportDebugEvent('E', 'copy-cleaner.user.js:onMiraCopyButtonClick', '[DEBUG] Mira copy-like control clicked', {
+      tagName: String(button.tagName || ''),
+      text: String(button.innerText || '').trim().slice(0, 300),
+      ariaLabel: String(button.getAttribute && button.getAttribute('aria-label') || '').trim(),
+      title: String(button.getAttribute && button.getAttribute('title') || '').trim(),
+      tooltip: String(button.getAttribute && button.getAttribute('data-tooltip') || '').trim(),
+      className: String(button.className || '').slice(0, 300),
+    });
+    // #endregion
+  }
+
   window.addEventListener('copy', onCopy, true);
   window.addEventListener('keydown', onKeydown, true);
   window.addEventListener('click', onChatGptCopyButtonClick, true);
+  window.addEventListener('click', onMiraCopyButtonClick, true);
 })();

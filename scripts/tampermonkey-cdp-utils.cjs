@@ -170,6 +170,52 @@ async function ensureTampermonkeyScriptEnabled(page, scriptName) {
   return result;
 }
 
+function buildSyncVerificationMarkers(scriptSource) {
+  var source = String(scriptSource || '').replace(/\r\n?/g, '\n');
+  var lines = source.split('\n').map(function (line) {
+    return line.trim();
+  }).filter(Boolean);
+  return lines.filter(function (line) {
+    return line.length >= 24 && line.indexOf('// @version') !== 0;
+  }).slice(0, 12);
+}
+
+async function readTargetEditorState(page, meta) {
+  var markers = buildSyncVerificationMarkers(meta && meta.scriptSource ? meta.scriptSource : '');
+  return page.evaluate(function (payload) {
+    var codeMirrors = Array.from(document.querySelectorAll('.CodeMirror'));
+    var target = codeMirrors.map(function (el) {
+      var instance = el.CodeMirror;
+      var value = instance ? String(instance.getValue() || '') : '';
+      return {
+        value: value,
+        hasName: payload.name ? value.indexOf('@name         ' + payload.name) !== -1 || value.indexOf('@name ' + payload.name) !== -1 : false,
+      };
+    }).find(function (item) {
+      return item.hasName;
+    }) || null;
+    if (!target) {
+      return {
+        found: false,
+        value: '',
+        matchedMarkers: [],
+      };
+    }
+    var normalized = target.value.replace(/\r\n?/g, '\n');
+    var matchedMarkers = payload.markers.filter(function (marker) {
+      return normalized.indexOf(marker) !== -1;
+    });
+    return {
+      found: true,
+      value: normalized,
+      matchedMarkers: matchedMarkers,
+    };
+  }, {
+    name: meta && meta.name ? String(meta.name) : '',
+    markers: markers,
+  });
+}
+
 async function syncTampermonkeyScript(page, options) {
   var scriptSource = options && options.scriptSource ? String(options.scriptSource) : readUserscriptSource(options && options.scriptPath);
   var meta = extractUserscriptMetadata(scriptSource);
@@ -228,11 +274,15 @@ async function syncTampermonkeyScript(page, options) {
     return document.readyState === 'complete' && location.href.includes(String(expectedScriptId || '') + '+editor');
   }, scriptId, { timeout: 15000 });
 
-  var editorText = await page.evaluate(function () {
-    return String(document.body ? document.body.innerText : '');
+  var editorState = await readTargetEditorState(page, {
+    name: meta.name,
+    scriptSource: scriptSource,
   });
-  if (meta.version && editorText.indexOf(meta.version) === -1) {
-    throw new Error('Tampermonkey editor did not show expected version ' + meta.version);
+  if (!editorState.found) {
+    throw new Error('Tampermonkey editor instance for ' + meta.name + ' not found.');
+  }
+  if (editorState.value.indexOf(scriptSource.replace(/\r\n?/g, '\n')) === -1 && editorState.matchedMarkers.length < 3) {
+    throw new Error('Tampermonkey editor content did not match the local userscript source.');
   }
 
   await openTampermonkeyPage(page, {
@@ -248,6 +298,7 @@ async function syncTampermonkeyScript(page, options) {
     version: meta.version,
     enableResult: enableResult,
     editorUrl: page.url(),
+    matchedMarkers: editorState.matchedMarkers.length,
   };
 }
 
