@@ -9,7 +9,7 @@ function loadCopyCleanerExports() {
   const source = fs.readFileSync(filePath, 'utf8');
   const instrumented = source.replace(
     /\}\)\(\);\s*$/,
-    "window.__copyCleanerTestExports = { cleanText: cleanText, splitByLatex: splitByLatex, buildClipboardPayloadFromSelection: buildClipboardPayloadFromSelection };})();"
+    "window.__copyCleanerTestExports = { cleanText: cleanText, splitByLatex: splitByLatex, buildClipboardPayloadFromSelection: buildClipboardPayloadFromSelection, serializeStructuredFragment: serializeStructuredFragment, extractFragmentText: extractFragmentText };})();"
   );
 
   if (instrumented === source) {
@@ -109,4 +109,129 @@ test('copy cleaner removes old debug globals but keeps dual copy entry points', 
   assert.doesNotMatch(source, /__tampermonkeyScriptDebugExports/);
   assert.match(source, /window\.addEventListener\('copy', onCopy, true\)/);
   assert.match(source, /window\.addEventListener\('keydown', onKeydown, true\)/);
+});
+
+function createTextNode(text) {
+  return {
+    nodeType: 3,
+    nodeValue: text,
+    textContent: text,
+    parentElement: null,
+    nextSibling: null,
+  };
+}
+
+function linkChildren(parent, children) {
+  parent.firstChild = children[0] || null;
+  for (let i = 0; i < children.length; i++) {
+    children[i].parentElement = parent;
+    children[i].nextSibling = children[i + 1] || null;
+  }
+}
+
+function createElement(tagName, children) {
+  const element = {
+    nodeType: 1,
+    tagName: tagName,
+    parentElement: null,
+    nextSibling: null,
+    firstChild: null,
+    children: [],
+    firstElementChild: null,
+    classList: { contains: function () { return false; } },
+    querySelector: function (selector) {
+      selector = String(selector || '').toUpperCase();
+      function visit(node) {
+        if (!node || node.nodeType !== 1) return null;
+        if (node.tagName === selector) return node;
+        for (let child = node.firstChild; child; child = child.nextSibling) {
+          const found = visit(child);
+          if (found) return found;
+        }
+        return null;
+      }
+      return visit(this);
+    },
+  };
+  children = children || [];
+  element.children = children.filter(function (child) {
+    return child.nodeType === 1;
+  });
+  element.firstElementChild = element.children[0] || null;
+  linkChildren(element, children);
+  Object.defineProperty(element, 'textContent', {
+    get: function () {
+      let text = '';
+      for (let child = this.firstChild; child; child = child.nextSibling) {
+        text += child.textContent || child.nodeValue || '';
+      }
+      return text;
+    },
+  });
+  return element;
+}
+
+function createFragment(children) {
+  const fragment = {
+    nodeType: 11,
+    firstChild: null,
+    querySelector: function (selector) {
+      const selectors = String(selector || '').split(',').map(function (item) {
+        return item.trim().toUpperCase().split(/\s+/).pop();
+      }).filter(Boolean);
+      function visit(node) {
+        if (!node || node.nodeType !== 1) return null;
+        if (selectors.includes(node.tagName)) return node;
+        for (let child = node.firstChild; child; child = child.nextSibling) {
+          const found = visit(child);
+          if (found) return found;
+        }
+        return null;
+      }
+      for (let child = fragment.firstChild; child; child = child.nextSibling) {
+        const found = visit(child);
+        if (found) return found;
+      }
+      return null;
+    },
+  };
+  linkChildren(fragment, children || []);
+  return fragment;
+}
+
+test('copy cleaner preserves inline code when structured fragments are serialized', () => {
+  const { extractFragmentText } = loadCopyCleanerExports();
+  const fragment = createFragment([
+    createElement('P', [
+      createTextNode('请运行 '),
+      createElement('CODE', [createTextNode('const x = 1')]),
+      createTextNode(' 再继续'),
+    ]),
+  ]);
+
+  assert.equal(
+    extractFragmentText(fragment, '请运行 const x = 1 再继续'),
+    '请运行 `const x = 1` 再继续'
+  );
+});
+
+test('copy cleaner preserves fenced code blocks for wrapped pre/code structures', () => {
+  const { serializeStructuredFragment } = loadCopyCleanerExports();
+  const fragment = createFragment([
+    createElement('DIV', [
+      createElement('PRE', [
+        createElement('DIV', [createTextNode('Python')]),
+        createElement('DIV', [
+          createElement('CODE', [
+            createTextNode('for i in range(3):\n    print(i)\n'),
+          ]),
+        ]),
+      ]),
+    ]),
+  ]);
+
+  assert.equal(
+    serializeStructuredFragment(fragment),
+    '```\nfor i in range(3):\n    print(i)\n```'
+  );
 });

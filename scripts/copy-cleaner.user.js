@@ -15,6 +15,32 @@
 (function () {
   'use strict';
 
+  // #region debug-point A:report-event
+  function reportDebugEvent(hypothesisId, debugLocation, msg, data) {
+    if (!/https:\/\/chatgpt\.com\//.test(String(window.location && window.location.href || ''))) return;
+    var debugServerUrl = (function () {
+      try {
+        return document.documentElement.getAttribute('data-copy-cleaner-debug-url') || 'http://127.0.0.1:7777/event';
+      } catch (error) {
+        return 'http://127.0.0.1:7777/event';
+      }
+    })();
+    fetch(debugServerUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        sessionId: 'chatgpt-code-block-copy',
+        runId: 'pre-fix',
+        hypothesisId: hypothesisId,
+        location: debugLocation,
+        msg: msg,
+        data: data || {},
+        ts: Date.now(),
+      }),
+    }).catch(function () {});
+  }
+  // #endregion
+
   function cleanText(text, options) {
     options = options || {};
     var parts = splitByLatex(text);
@@ -398,6 +424,12 @@
 
     if (node.tagName === 'CODE') {
       var codeText = node.textContent.replace(/\r\n?/g, '\n').replace(/\n+/g, ' ');
+      // #region debug-point B:inline-code
+      reportDebugEvent('B', 'copy-cleaner.user.js:serializeInlineNode:code', '[DEBUG] inline code serialized', {
+        textLength: codeText.length,
+        preview: codeText.slice(0, 400),
+      });
+      // #endregion
       parts.push('`' + codeText.replace(/`/g, '\\`').replace(/\|/g, '\\|') + '`');
       return;
     }
@@ -527,6 +559,12 @@
       return;
     }
 
+    if (node.tagName === 'CODE') {
+      var inlineCodeText = node.textContent.replace(/\r\n?/g, '\n').replace(/\n+/g, ' ');
+      appendStructuredText(state, '`' + inlineCodeText.replace(/`/g, '\\`').replace(/\|/g, '\\|') + '`');
+      return;
+    }
+
     if (node.classList && node.classList.contains('katex-display')) {
       appendStructuredBlock(state, normalizeStructuredText(node.textContent || ''));
       return;
@@ -593,12 +631,18 @@
     }
 
     if (node.tagName === 'PRE') {
-      var codeChild = node.children && node.children.length === 1 && node.firstElementChild && node.firstElementChild.tagName === 'CODE'
-        ? node.firstElementChild
-        : null;
+      var codeChild = node.querySelector ? node.querySelector('code') : null;
       if (codeChild) {
         var codeText = codeChild.textContent.replace(/\r\n?/g, '\n').replace(/\n$/, '');
         var fence = getCodeFence(codeText);
+        // #region debug-point C:code-block
+        reportDebugEvent('C', 'copy-cleaner.user.js:serializeStructuredNode:pre', '[DEBUG] code block serialized', {
+          codeLength: codeText.length,
+          lineCount: codeText ? codeText.split('\n').length : 0,
+          fence: fence,
+          preview: codeText.slice(0, 400),
+        });
+        // #endregion
         appendStructuredBlock(state, fence + '\n' + codeText + '\n' + fence);
         return;
       }
@@ -627,7 +671,7 @@
   }
 
   function hasStructuredFragmentContent(fragment) {
-    return !!(fragment && fragment.querySelector && fragment.querySelector('ul li, ol li, h1, h2, h3, h4, h5, h6, blockquote, pre, hr, table'));
+    return !!(fragment && fragment.querySelector && fragment.querySelector('ul li, ol li, h1, h2, h3, h4, h5, h6, blockquote, pre, code, hr, table'));
   }
 
   function extractFragmentText(fragment, baseText) {
@@ -682,6 +726,14 @@
     var rawText = selection.toString();
     var latexPayload = resolveLatexSelectionPayload(selection);
     if (latexPayload !== null) {
+      // #region debug-point D:selection-latex
+      reportDebugEvent('D', 'copy-cleaner.user.js:buildClipboardPayloadFromSelection:latex', '[DEBUG] selection latex path used', {
+        rawLength: rawText.length,
+        payloadLength: latexPayload.text ? latexPayload.text.length : 0,
+        alreadyStructured: !!latexPayload.alreadyStructured,
+        preview: String(latexPayload.text || '').slice(0, 400),
+      });
+      // #endregion
       return {
         text: latexPayload.alreadyStructured ? latexPayload.text : cleanText(latexPayload.text),
       };
@@ -689,6 +741,16 @@
 
     var structuredText = extractStructuredSelectionText(selection);
     if (structuredText !== null) {
+      // #region debug-point D:selection-structured
+      reportDebugEvent('D', 'copy-cleaner.user.js:buildClipboardPayloadFromSelection:structured', '[DEBUG] selection structured path used', {
+        rawLength: rawText.length,
+        structuredLength: structuredText.text.length,
+        changed: structuredText.text !== rawText,
+        hasFence: /(^|\n)```/.test(structuredText.text),
+        hasInlineCode: /`[^`\n]+`/.test(structuredText.text),
+        preview: structuredText.text.slice(0, 400),
+      });
+      // #endregion
       return structuredText.text !== rawText
         ? { text: structuredText.text }
         : null;
@@ -696,6 +758,16 @@
 
     if (!rawText) return null;
     var cleanedText = cleanText(rawText);
+    // #region debug-point D:selection-plain
+    reportDebugEvent('D', 'copy-cleaner.user.js:buildClipboardPayloadFromSelection:plain', '[DEBUG] selection plain path used', {
+      rawLength: rawText.length,
+      cleanedLength: cleanedText.length,
+      changed: cleanedText !== rawText,
+      hasInlineCodeRaw: /`[^`\n]+`/.test(rawText),
+      hasInlineCodeCleaned: /`[^`\n]+`/.test(cleanedText),
+      preview: cleanedText.slice(0, 400),
+    });
+    // #endregion
     return cleanedText !== rawText
       ? { text: cleanedText }
       : null;
@@ -825,6 +897,16 @@
     extractLatexFromKatex(fragment);
     extractLatexFromMathJax(fragment);
     var text = serializeStructuredFragment(fragment);
+    // #region debug-point E:chatgpt-root
+    reportDebugEvent('E', 'copy-cleaner.user.js:buildClipboardPayloadFromRoot', '[DEBUG] chatgpt root payload built', {
+      hasPre: !!(fragment.querySelector && fragment.querySelector('pre')),
+      hasCode: !!(fragment.querySelector && fragment.querySelector('code')),
+      textLength: String(text || '').length,
+      hasFence: /(^|\n)```/.test(String(text || '')),
+      hasInlineCode: /`[^`\n]+`/.test(String(text || '')),
+      preview: String(text || '').slice(0, 400),
+    });
+    // #endregion
     if (!text) {
       text = cleanText(fragment.textContent || '');
     }
@@ -837,6 +919,15 @@
 
     var contentRoot = getChatGptAssistantContentRoot(button);
     var payload = buildClipboardPayloadFromRoot(contentRoot);
+    // #region debug-point F:chatgpt-copy-button
+    reportDebugEvent('F', 'copy-cleaner.user.js:onChatGptCopyButtonClick', '[DEBUG] chatgpt reply copy clicked', {
+      hasContentRoot: !!contentRoot,
+      payloadLength: payload && payload.text ? payload.text.length : 0,
+      hasFence: !!(payload && /(^|\n)```/.test(payload.text)),
+      hasInlineCode: !!(payload && /`[^`\n]+`/.test(payload.text)),
+      preview: payload && payload.text ? payload.text.slice(0, 400) : '',
+    });
+    // #endregion
     if (!payload || !payload.text) return;
 
     e.preventDefault();
