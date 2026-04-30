@@ -556,6 +556,11 @@
       return;
     }
 
+    if (node.classList && node.classList.contains('katex-display')) {
+      appendStructuredBlock(state, normalizeStructuredText(node.textContent || ''));
+      return;
+    }
+
     if (node.tagName === 'LI') {
       appendStructuredLineBreak(state);
       appendStructuredText(state, getListItemPrefix(node.parentElement, getListItemIndex(node)));
