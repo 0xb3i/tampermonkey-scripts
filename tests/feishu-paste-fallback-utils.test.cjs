@@ -3,12 +3,12 @@ const assert = require('node:assert/strict');
 
 const {
   runPasteAttemptWithFallback,
+  runPostValidationCleanup,
 } = require('../scripts/feishu-paste-fallback-utils.cjs');
 const {
   prepareNativeClipboardForValidation,
-  runPostValidationCleanup,
   shouldPreferNativeClipboardPasteForValidation,
-} = require('../scripts/feishu-helper-profile-runner.js');
+} = require('../scripts/feishu-native-paste-validation-utils.cjs');
 
 test('runPasteAttemptWithFallback stops after Cmd+Shift+P when snapshot changed', () => {
   const calls = [];

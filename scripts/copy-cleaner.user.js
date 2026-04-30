@@ -3,7 +3,7 @@
 // @namespace    https://github.com/tampermonkey-scripts
 // @version      5.0.0
 // @description  复制时自动去除加粗/括号/引号，并将数学公式提取为 LaTeX $$ 格式，兼容网站自带复制按钮
-// @author       You
+// @author       beibei
 // @match        *://*/*
 // @exclude      https://*.feishu.cn/*
 // @exclude      https://*.larksuite.com/*
@@ -14,9 +14,6 @@
 
 (function () {
   'use strict';
-
-  var SCRIPT_NAME = '复制净化器';
-  var SCRIPT_VERSION = '5.0.0';
 
   function cleanText(text, options) {
     options = options || {};
@@ -96,13 +93,50 @@
     return result;
   }
 
-  window.__copyCleanerCleanText = cleanText;
-  window.__copyCleanerSplitByLatex = splitByLatex;
-
   var LATEX_DELIMITERS = {
     inline: ['$', '$'],
     display: ['$$', '$$'],
   };
+
+  function getLatexDelimiters(isDisplay) {
+    return isDisplay ? LATEX_DELIMITERS.display : LATEX_DELIMITERS.inline;
+  }
+
+  function getLatexDataAttr(isDisplay) {
+    return isDisplay ? 'data-latex-display' : 'data-latex';
+  }
+
+  function replaceNodeWithText(node, text) {
+    var textNode = document.createTextNode(text);
+    if (node.replaceWith) {
+      node.replaceWith(textNode);
+    } else if (node.parentNode) {
+      node.parentNode.replaceChild(textNode, node);
+    }
+  }
+
+  function formatLatexText(latex, isDisplay) {
+    var delimiters = getLatexDelimiters(isDisplay);
+    return delimiters[0] + latex + delimiters[1];
+  }
+
+  function annotateKatexElement(el) {
+    if (!el || el.hasAttribute('data-latex') || el.hasAttribute('data-latex-display')) return false;
+    var annotation = el.querySelector('.katex-mathml annotation');
+    if (!annotation) return false;
+    el.setAttribute(getLatexDataAttr(el.closest('.katex-display') !== null), annotation.textContent);
+    return true;
+  }
+
+  function annotateKatexTree(root) {
+    if (!root || root.nodeType !== 1) return;
+    if (root.classList && root.classList.contains('katex')) annotateKatexElement(root);
+    if (!root.querySelectorAll) return;
+    var katexElements = root.querySelectorAll('.katex:not([data-latex]):not([data-latex-display])');
+    for (var i = 0; i < katexElements.length; i++) {
+      annotateKatexElement(katexElements[i]);
+    }
+  }
 
   function patchKaTeX() {
     var katexPatched = false;
@@ -116,8 +150,7 @@
         katex.renderToString = function (expression, options) {
           options = options || {};
           var result = origRenderToString.call(this, expression, options);
-          var displayMode = options.displayMode || false;
-          var dataAttr = displayMode ? 'data-latex-display' : 'data-latex';
+          var dataAttr = getLatexDataAttr(options.displayMode || false);
           result = result.replace(/class="katex"/, 'class="katex" ' + dataAttr + '="' + expression.replace(/"/g, '&quot;') + '"');
           return result;
         };
@@ -127,12 +160,10 @@
         var origRender = katex.render;
         katex.render = function (expression, element, options) {
           options = options || {};
-          var displayMode = options.displayMode || false;
-          var dataAttr = displayMode ? 'data-latex-display' : 'data-latex';
           var result = origRender.call(this, expression, element, options);
           var katexEl = element.querySelector && element.querySelector('.katex');
           if (katexEl) {
-            katexEl.setAttribute(dataAttr, expression);
+            katexEl.setAttribute(getLatexDataAttr(options.displayMode || false), expression);
           }
           return result;
         };
@@ -168,16 +199,7 @@
   patchKaTeX();
 
   function annotateExistingKatex() {
-    var katexElements = document.querySelectorAll('.katex:not([data-latex]):not([data-latex-display])');
-    for (var i = 0; i < katexElements.length; i++) {
-      var el = katexElements[i];
-      var annotation = el.querySelector('.katex-mathml annotation');
-      if (annotation) {
-        var isDisplay = el.closest('.katex-display') !== null;
-        var attr = isDisplay ? 'data-latex-display' : 'data-latex';
-        el.setAttribute(attr, annotation.textContent);
-      }
-    }
+    annotateKatexTree(document.body || document.documentElement);
   }
 
   var mathObserver = new MutationObserver(function (mutations) {
@@ -186,23 +208,7 @@
       for (var j = 0; j < added.length; j++) {
         var node = added[j];
         if (node.nodeType !== 1) continue;
-        if (node.classList && node.classList.contains('katex') && !node.hasAttribute('data-latex') && !node.hasAttribute('data-latex-display')) {
-          var ann = node.querySelector('.katex-mathml annotation');
-          if (ann) {
-            var isDisp = node.closest('.katex-display') !== null;
-            node.setAttribute(isDisp ? 'data-latex-display' : 'data-latex', ann.textContent);
-          }
-        }
-        if (node.querySelectorAll) {
-          var katexNodes = node.querySelectorAll('.katex:not([data-latex]):not([data-latex-display])');
-          for (var k = 0; k < katexNodes.length; k++) {
-            var ann2 = katexNodes[k].querySelector('.katex-mathml annotation');
-            if (ann2) {
-              var isDisp2 = katexNodes[k].closest('.katex-display') !== null;
-              katexNodes[k].setAttribute(isDisp2 ? 'data-latex-display' : 'data-latex', ann2.textContent);
-            }
-          }
-        }
+        annotateKatexTree(node);
       }
     }
   });
@@ -216,6 +222,21 @@
     });
   }
 
+  function getKatexLatexData(katexEl) {
+    if (katexEl.hasAttribute('data-latex-display')) {
+      return { latex: katexEl.getAttribute('data-latex-display'), isDisplay: true };
+    }
+    if (katexEl.hasAttribute('data-latex')) {
+      return { latex: katexEl.getAttribute('data-latex'), isDisplay: false };
+    }
+    var annotation = katexEl.querySelector('.katex-mathml annotation');
+    if (!annotation) return null;
+    return {
+      latex: annotation.textContent,
+      isDisplay: katexEl.closest('.katex-display') !== null,
+    };
+  }
+
   function extractLatexFromKatex(fragment) {
     var katexHtml = fragment.querySelectorAll('.katex-mathml + .katex-html');
     for (var i = 0; i < katexHtml.length; i++) {
@@ -226,76 +247,36 @@
 
     var katexEls = fragment.querySelectorAll('.katex');
     for (var j = 0; j < katexEls.length; j++) {
-      var katexEl = katexEls[j];
-      var latex = null;
-      var isDisplay = false;
-
-      if (katexEl.hasAttribute('data-latex-display')) {
-        latex = katexEl.getAttribute('data-latex-display');
-        isDisplay = true;
-      } else if (katexEl.hasAttribute('data-latex')) {
-        latex = katexEl.getAttribute('data-latex');
-        isDisplay = false;
-      } else {
-        var mathml = katexEl.querySelector('.katex-mathml');
-        if (mathml) {
-          var texSource = mathml.querySelector('annotation');
-          if (texSource) {
-            latex = texSource.textContent;
-            isDisplay = katexEl.closest('.katex-display') !== null;
-          }
-        }
-      }
-
-      if (latex !== null) {
-        var delimiters = isDisplay ? LATEX_DELIMITERS.display : LATEX_DELIMITERS.inline;
-        var tex = delimiters[0] + latex + delimiters[1];
-        var textNode = document.createTextNode(tex);
-        if (katexEl.replaceWith) { katexEl.replaceWith(textNode); }
-        else if (katexEl.parentNode) { katexEl.parentNode.replaceChild(textNode, katexEl); }
-      }
+      var katexData = getKatexLatexData(katexEls[j]);
+      if (katexData) replaceNodeWithText(katexEls[j], formatLatexText(katexData.latex, katexData.isDisplay));
     }
 
     return fragment;
   }
 
-  function extractLatexFromMathJax(fragment) {
-    var mjxContainers = fragment.querySelectorAll('mjx-container');
-    for (var j = 0; j < mjxContainers.length; j++) {
-      var container = mjxContainers[j];
-      var latex = null;
-      var isDisplay = container.getAttribute('display') === 'true' || container.hasAttribute('display');
-
-      var mathEl = container.querySelector('math');
-      if (mathEl) {
-        var annotation = mathEl.querySelector('annotation');
-        if (annotation) {
-          latex = annotation.textContent;
-        }
-      }
-
-      if (latex !== null) {
-        var delimiters = isDisplay ? LATEX_DELIMITERS.display : LATEX_DELIMITERS.inline;
-        var tex = delimiters[0] + latex + delimiters[1];
-        var textNode = document.createTextNode(tex);
-        if (container.replaceWith) { container.replaceWith(textNode); }
-        else if (container.parentNode) { container.parentNode.replaceChild(textNode, container); }
-      }
+  function getMathJaxLatexData(el) {
+    var latex = el.getAttribute('data-latex-display') || el.getAttribute('data-latex');
+    if (latex) {
+      return {
+        latex: latex,
+        isDisplay: el.hasAttribute('data-latex-display') || el.classList.contains('MathJax_Display') || el.classList.contains('mathjax-display'),
+      };
     }
+    var annotation = el.querySelector('math annotation');
+    if (!annotation) return null;
+    return {
+      latex: annotation.textContent,
+      isDisplay: el.getAttribute('display') === 'true' || el.hasAttribute('display'),
+    };
+  }
 
-    var mathjaxElements = fragment.querySelectorAll('[data-latex], [data-latex-display]');
+  function extractLatexFromMathJax(fragment) {
+    var mathjaxElements = fragment.querySelectorAll('mjx-container, [data-latex], [data-latex-display]');
     for (var k = 0; k < mathjaxElements.length; k++) {
       var mjEl = mathjaxElements[k];
       if (mjEl.classList.contains('katex')) continue;
-      var latexAttr = mjEl.getAttribute('data-latex-display') || mjEl.getAttribute('data-latex');
-      if (latexAttr) {
-        var isDisplay3 = mjEl.hasAttribute('data-latex-display') || mjEl.classList.contains('MathJax_Display') || mjEl.classList.contains('mathjax-display');
-        var delimiters3 = isDisplay3 ? LATEX_DELIMITERS.display : LATEX_DELIMITERS.inline;
-        var tex3 = delimiters3[0] + latexAttr + delimiters3[1];
-        var textNode3 = document.createTextNode(tex3);
-        if (mjEl.replaceWith) { mjEl.replaceWith(textNode3); }
-        else if (mjEl.parentNode) { mjEl.parentNode.replaceChild(textNode3, mjEl); }
-      }
+      var mathJaxData = getMathJaxLatexData(mjEl);
+      if (mathJaxData) replaceNodeWithText(mjEl, formatLatexText(mathJaxData.latex, mathJaxData.isDisplay));
     }
 
     return fragment;
@@ -634,24 +615,16 @@
     };
   }
 
-  function extractTextWithLatex(selection) {
-    var payload = resolveLatexSelectionPayload(selection);
-    return payload ? payload.text : null;
-  }
-
   function extractStructuredSelectionText(selection) {
     if (!selection || selection.rangeCount === 0) return null;
     var fragment = selection.getRangeAt(0).cloneContents();
     if (!hasStructuredFragmentContent(fragment)) return null;
     return {
       text: extractFragmentText(fragment, selection.toString()),
-      alreadyCleaned: true,
     };
   }
 
-  window.__copyCleanerExtractLatex = extractTextWithLatex;
-
-  function resolveSelectionPayload(selection) {
+  function buildClipboardPayloadFromSelection(selection) {
     if (!selection || selection.isCollapsed) return null;
 
     var rawText = selection.toString();
@@ -659,31 +632,21 @@
     if (latexPayload !== null) {
       return {
         text: latexPayload.alreadyStructured ? latexPayload.text : cleanText(latexPayload.text),
-        shouldIntercept: true,
       };
     }
 
     var structuredText = extractStructuredSelectionText(selection);
     if (structuredText !== null) {
-      return {
-        text: structuredText.text,
-        shouldIntercept: structuredText.text !== rawText,
-      };
+      return structuredText.text !== rawText
+        ? { text: structuredText.text }
+        : null;
     }
 
     if (!rawText) return null;
     var cleanedText = cleanText(rawText);
-    if (cleanedText !== rawText) {
-      return { text: cleanedText, shouldIntercept: true };
-    }
-
-    return null;
-  }
-
-  function getCleanedText() {
-    var selection = window.getSelection();
-    var payload = resolveSelectionPayload(selection);
-    return payload && payload.shouldIntercept ? payload : null;
+    return cleanedText !== rawText
+      ? { text: cleanedText }
+      : null;
   }
 
   var shouldBypassClipboardClean = false;
@@ -706,14 +669,13 @@
     if (typeof Clipboard === 'undefined' || !Clipboard.prototype) return;
 
     if (Clipboard.prototype.writeText) {
-      const originalWriteText = Clipboard.prototype.writeText;
+      var originalWriteText = Clipboard.prototype.writeText;
       Object.defineProperty(Clipboard.prototype, 'writeText', {
         value: function (text) {
           if (shouldBypassClipboardClean) {
             return originalWriteText.call(this, text);
           }
-          const cleaned = cleanText(text);
-          return originalWriteText.call(this, cleaned);
+          return originalWriteText.call(this, cleanText(text));
         },
         writable: true,
         configurable: true,
@@ -722,13 +684,13 @@
     }
 
     if (Clipboard.prototype.write) {
-      const originalWrite = Clipboard.prototype.write;
+      var originalWrite = Clipboard.prototype.write;
       Object.defineProperty(Clipboard.prototype, 'write', {
         value: function (items) {
-          const newItems = [];
-          for (const item of items) {
-            const newItem = {};
-            for (const type of item.types) {
+          var newItems = [];
+          for (var item of items) {
+            var newItem = {};
+            for (var type of item.types) {
               if (type === 'text/plain') {
                 newItem[type] = item.getType(type).then(function (blob) {
                   return blob.text();
@@ -736,8 +698,7 @@
                   if (shouldBypassClipboardClean) {
                     return new Blob([text], { type: 'text/plain' });
                   }
-                  const cleaned = cleanText(text);
-                  return new Blob([cleaned], { type: 'text/plain' });
+                  return new Blob([cleanText(text)], { type: 'text/plain' });
                 });
               } else {
                 newItem[type] = item.getType(type);
@@ -757,9 +718,8 @@
   patchClipboardAPI();
 
   function onCopy(e) {
-    var selection = window.getSelection();
-    var payload = resolveSelectionPayload(selection);
-    if (!payload || !payload.shouldIntercept || !e.clipboardData) return;
+    var payload = buildClipboardPayloadFromSelection(window.getSelection());
+    if (!payload || !e.clipboardData) return;
 
     e.preventDefault();
     e.stopImmediatePropagation();
@@ -770,7 +730,7 @@
     var isCopy = (e.ctrlKey || e.metaKey) && e.key === 'c';
     if (!isCopy) return;
 
-    var payload = getCleanedText();
+    var payload = buildClipboardPayloadFromSelection(window.getSelection());
     if (payload === null) return;
 
     e.preventDefault();
@@ -782,19 +742,6 @@
       }).catch(function () {});
     }
   }
-
-  window.__tampermonkeyScriptDebugExports = function () {
-    return {
-      name: SCRIPT_NAME,
-      version: SCRIPT_VERSION,
-      automation: null,
-      exports: {
-        cleanText: typeof window.__copyCleanerCleanText,
-        splitByLatex: typeof window.__copyCleanerSplitByLatex,
-        extractLatex: typeof window.__copyCleanerExtractLatex,
-      },
-    };
-  };
   window.addEventListener('copy', onCopy, true);
   window.addEventListener('keydown', onKeydown, true);
 })();
