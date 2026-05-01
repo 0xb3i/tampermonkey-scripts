@@ -206,6 +206,20 @@ test('copy cleaner preserves fenced code blocks when normalizing markdown clipbo
   );
 });
 
+test('copy cleaner preserves existing markdown styling when clipboard text is already structured markdown', () => {
+  const { normalizeClipboardText } = loadCopyCleanerExports();
+  const input = [
+    '## 标题',
+    '',
+    '这是一段 **加粗** 与 *斜体*，还有 `inline code`。',
+    '',
+    '*   第一项',
+    '*   第二项',
+    '    *   子项',
+  ].join('\n');
+  assert.equal(normalizeClipboardText(input), input);
+});
+
 test('copy cleaner inserts a blank line after markdown tables for Feishu rendering', () => {
   const { normalizeStructuredMarkdownForPaste } = loadCopyCleanerExports();
   assert.equal(

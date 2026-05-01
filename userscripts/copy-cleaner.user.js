@@ -96,14 +96,29 @@
   function looksLikeMarkdownCopy(text) {
     if (!text) return false;
     var doubleBreaks = (text.match(/\n\n/g) || []).length;
-    if (doubleBreaks < 8) return false;
-    return /(^|\n)(#{1,6}\s|[-*]\s|\d+\.\s|>\s|```|---\s*$)/m.test(text);
+    var hasBlockMarkdown = /(^|\n)(#{1,6}\s|[-*]\s|\d+\.\s|>\s|```|---\s*$)/m.test(text);
+    if (!hasBlockMarkdown) return false;
+    if (doubleBreaks >= 8) return true;
+    return doubleBreaks >= 2 &&
+      /(\*\*[^*\n]+\*\*|\*[^*\n]+\*|`[^`\n]+`|!\[[^\]]*\]\([^)]+\)|\[[^\]]+\]\([^)]+\)|(^|\n)\|.+\|)/m.test(text);
   }
 
   function compactMarkdownBlankLines(text) {
     var parts = String(text || '').split(/(```[\s\S]*?```)/g);
     for (var i = 0; i < parts.length; i += 2) {
       parts[i] = parts[i].replace(/\n{2,}/g, '\n');
+    }
+    return parts.join('');
+  }
+
+  function cleanStructuredMarkdownStyles(text) {
+    var parts = String(text || '').split(/(```[\s\S]*?```|`[^`\n]+`)/g);
+    for (var i = 0; i < parts.length; i += 2) {
+      parts[i] = parts[i]
+        .replace(/(\*\*\*|___)([^*\n_]+?)\1/g, '$2')
+        .replace(/(\*\*|__)([^*\n_]+?)\1/g, '$2')
+        .replace(/~~([^~\n]+?)~~/g, '$1')
+        .replace(/(^|[\s(>])\*([^*\n]+?)\*(?=[$\s).,!?;:]|$)/gm, '$1$2');
     }
     return parts.join('');
   }
@@ -133,8 +148,12 @@
   }
 
   function normalizeClipboardText(text) {
-    if (looksLikePlainCodeCopy(text)) return String(text || '').replace(/\r\n?/g, '\n');
-    var cleaned = cleanTextOutsideCodeFences(text);
+    var normalizedText = String(text || '').replace(/\r\n?/g, '\n');
+    if (looksLikePlainCodeCopy(normalizedText)) return normalizedText;
+    if (looksLikeMarkdownCopy(normalizedText)) {
+      return normalizeStructuredMarkdownForPaste(normalizedText);
+    }
+    var cleaned = cleanTextOutsideCodeFences(normalizedText);
     cleaned = normalizeStructuredMarkdownForPaste(cleaned);
     return looksLikeMarkdownCopy(cleaned)
       ? compactMarkdownBlankLines(cleaned)
@@ -164,6 +183,14 @@
     return result.join('\n');
   }
 
+  function normalizeAiStudioMarkdownForPaste(text) {
+    return normalizeStructuredMarkdownForPaste(cleanStructuredMarkdownStyles(text));
+  }
+
+  function isAiStudioPage() {
+    return /https:\/\/aistudio\.google\.com\//.test(String(window.location && window.location.href || ''));
+  }
+
   function getLatexDataAttr(isDisplay) {
     return isDisplay ? 'data-latex-display' : 'data-latex';
   }
@@ -191,11 +218,35 @@
     return '![' + String(alt || '').replace(/]/g, '\\]') + '](' + String(src).replace(/\)/g, '\\)') + ')';
   }
 
+  function normalizeHrefForMarkdown(href) {
+    var value = String(href || '');
+    if (!value) return '';
+    var googleRedirectMatch = value.match(/^https:\/\/www\.google\.com\/url\?(.*)$/i);
+    if (googleRedirectMatch && typeof URLSearchParams !== 'undefined') {
+      var params = new URLSearchParams(googleRedirectMatch[1]);
+      var target = params.get('q') || params.get('url') || '';
+      if (target) value = target;
+    }
+    try {
+      return decodeURIComponent(value);
+    } catch (error) {
+      return value;
+    }
+  }
+
   function shouldSkipImageNode(node) {
     var src = getAttributeValue(node, 'src');
     var alt = getAttributeValue(node, 'alt');
     if (!src) return true;
     return /^data:image\/svg\+xml/i.test(src) && !alt;
+  }
+
+  function shouldSkipUiChromeNode(node) {
+    if (!node || node.nodeType !== Node.ELEMENT_NODE) return false;
+    if (/^(BUTTON|MAT-ICON|SVG|PATH)$/.test(node.tagName)) return true;
+    var className = String(node.className || '');
+    return /(^|\s)(buttons?|actions-container|projected-actions-wrapper|copy-button|download-button|toggle-edit-button|rerun-button|mat-mdc-tooltip-trigger)(\s|$)/.test(className) ||
+      /code-block-decoration|header-formatted|table-block has-export-button|export-button/i.test(className);
   }
 
   function getRenderedText(node) {
@@ -244,8 +295,13 @@
   function annotateKatexElement(el) {
     if (!el || el.hasAttribute('data-latex') || el.hasAttribute('data-latex-display')) return false;
     var annotation = el.querySelector('.katex-mathml annotation');
-    if (!annotation) return false;
-    el.setAttribute(getLatexDataAttr(el.closest('.katex-display') !== null), annotation.textContent);
+    var latexText = annotation ? annotation.textContent : '';
+    if (!latexText) {
+      var mathHolder = el.closest('[data-math]');
+      latexText = mathHolder ? getAttributeValue(mathHolder, 'data-math') : '';
+    }
+    if (!latexText) return false;
+    el.setAttribute(getLatexDataAttr(el.closest('.katex-display') !== null), latexText);
     return true;
   }
 
@@ -459,6 +515,7 @@
     }
 
     if (node.nodeType !== Node.ELEMENT_NODE) return;
+    if (shouldSkipUiChromeNode(node)) return;
 
     if (node.tagName === 'BR') {
       parts.push(options && options.lineBreakToken ? options.lineBreakToken : '\n');
@@ -478,7 +535,7 @@
 
     if (node.tagName === 'A') {
       var label = getInlineNodeText(node, options);
-      var href = getAttributeValue(node, 'href');
+      var href = normalizeHrefForMarkdown(getAttributeValue(node, 'href'));
       if (hasAttributeValue(node, 'data-footnote-ref')) {
         var refText = String(label || '').replace(/[^\d]+/g, '') || '1';
         parts.push('[^' + refText + ']');
@@ -517,6 +574,9 @@
     if (node.nodeType !== Node.ELEMENT_NODE && node.nodeType !== Node.DOCUMENT_FRAGMENT_NODE) {
       return '';
     }
+    if (node.nodeType === Node.ELEMENT_NODE && shouldSkipUiChromeNode(node)) {
+      return '';
+    }
     if (node.nodeType === Node.ELEMENT_NODE && node.tagName === 'BR') {
       return '\n';
     }
@@ -529,7 +589,7 @@
     }
     if (node.nodeType === Node.ELEMENT_NODE && node.tagName === 'A') {
       var label = getInlineNodeText(node, { lineBreakToken: ' ' });
-      var href = getAttributeValue(node, 'href');
+      var href = normalizeHrefForMarkdown(getAttributeValue(node, 'href'));
       return href && label ? '[' + label.replace(/]/g, '\\]') + '](' + href.replace(/\)/g, '\\)') + ')' : label;
     }
     var text = '';
@@ -567,6 +627,12 @@
       return line || index < lines.length - 1;
     });
     var languageLabel = preNode && preNode.querySelector ? getRenderedText(preNode.querySelector('.code-block-language-label')).trim().toLowerCase() : '';
+    if (!languageLabel && preNode && preNode.parentElement && preNode.parentElement.parentElement && preNode.parentElement.parentElement.previousElementSibling) {
+      var siblingHeaderText = getRenderedText(preNode.parentElement.parentElement.previousElementSibling).trim().toLowerCase();
+      if (/^[a-z0-9.+#_-]{1,30}$/.test(siblingHeaderText)) {
+        languageLabel = siblingHeaderText;
+      }
+    }
     var classLanguage = '';
     function readClassLanguage(value) {
       var match = String(value || '').match(/(?:^|\s)language-([A-Za-z0-9.+#_-]{1,30})(?:\s|$)/);
@@ -638,6 +704,20 @@
     return {
       language: detectLanguage(preLines.slice(codeStartIndex).join('\n')),
       codeText: preLines.slice(codeStartIndex).join('\n').replace(/\n$/, ''),
+    };
+  }
+
+  function extractAiStudioCodeBlock(node) {
+    if (!node || node.tagName !== 'MS-CODE-BLOCK' || !node.querySelector) return null;
+    var nestedPre = node.querySelector('pre');
+    if (!nestedPre) return null;
+    var nestedCode = nestedPre.querySelector('code') || nestedPre;
+    var codeBlock = extractPreformattedCodeBlock(nestedPre, nestedCode);
+    var language = getAttributeValue(node, 'data-test-language').toLowerCase() ||
+      String(getRenderedText(node.querySelector('.title-text')) || '').trim().toLowerCase();
+    return {
+      codeText: codeBlock.codeText,
+      language: language || codeBlock.language,
     };
   }
 
@@ -780,6 +860,7 @@
     }
 
     if (node.nodeType !== Node.ELEMENT_NODE) return;
+    if (shouldSkipUiChromeNode(node)) return;
 
     if (node.tagName === 'BR') {
       appendStructuredLineBreak(state);
@@ -799,6 +880,16 @@
 
     if (node.tagName === 'A' || node.tagName === 'IMG') {
       appendStructuredLiteralText(state, getLiteralInlineText(node));
+      return;
+    }
+
+    if (hasAttributeValue(node, 'data-latex-display')) {
+      appendStructuredLiteralText(state, formatLatexText(getAttributeValue(node, 'data-latex-display'), true));
+      return;
+    }
+
+    if (hasAttributeValue(node, 'data-latex')) {
+      appendStructuredLiteralText(state, formatLatexText(getAttributeValue(node, 'data-latex'), false));
       return;
     }
 
@@ -905,6 +996,15 @@
         appendStructuredLineBreak(state);
       }
       return;
+    }
+
+    if (node.tagName === 'MS-CODE-BLOCK') {
+      var aiStudioCodeBlock = extractAiStudioCodeBlock(node);
+      if (aiStudioCodeBlock && aiStudioCodeBlock.codeText) {
+        var aiStudioFence = getCodeFence(aiStudioCodeBlock.codeText);
+        appendStructuredBlock(state, aiStudioFence + aiStudioCodeBlock.language + '\n' + aiStudioCodeBlock.codeText + '\n' + aiStudioFence);
+        return;
+      }
     }
 
     if (getAttributeValue(node, 'data-testid') === 'code_block' && node.querySelector) {
@@ -1069,6 +1169,23 @@
     return copyTextWithMarker(text, markerName);
   }
 
+  function copyAiStudioMarkdownFromClipboard(markerName) {
+    if (!navigator.clipboard || !navigator.clipboard.readText || !navigator.clipboard.writeText) {
+      return Promise.resolve('');
+    }
+    return navigator.clipboard.readText().then(function (text) {
+      var normalizedText = normalizeAiStudioMarkdownForPaste(text);
+      return withClipboardCleanBypass(function () {
+        return navigator.clipboard.writeText(normalizedText);
+      }).then(function () {
+        setCopyMarker(markerName, normalizedText);
+        return normalizedText;
+      });
+    }).catch(function () {
+      return '';
+    });
+  }
+
   // #region debug-point A:reporter
   function reportSelectionCopyDebug(hypothesisId, location, msg, data) {
     if (typeof fetch !== 'function') return;
@@ -1208,7 +1325,14 @@
           if (shouldBypassClipboardClean) {
             return originalWriteText.call(this, text);
           }
-          return originalWriteText.call(this, normalizeClipboardText(text));
+          var normalizedText = isAiStudioPage() && looksLikeMarkdownCopy(text)
+            ? normalizeAiStudioMarkdownForPaste(text)
+            : normalizeClipboardText(text);
+          var result = originalWriteText.call(this, normalizedText);
+          if (isAiStudioPage() && looksLikeMarkdownCopy(text)) {
+            setCopyMarker('data-copy-cleaner-aistudio-copy', normalizedText);
+          }
+          return result;
         },
         writable: true,
         configurable: true,
@@ -1231,7 +1355,13 @@
                   if (shouldBypassClipboardClean) {
                     return new Blob([text], { type: 'text/plain' });
                   }
-                  return new Blob([normalizeClipboardText(text)], { type: 'text/plain' });
+                  var normalizedText = isAiStudioPage() && looksLikeMarkdownCopy(text)
+                    ? normalizeAiStudioMarkdownForPaste(text)
+                    : normalizeClipboardText(text);
+                  if (isAiStudioPage() && looksLikeMarkdownCopy(text)) {
+                    setCopyMarker('data-copy-cleaner-aistudio-copy', normalizedText);
+                  }
+                  return new Blob([normalizedText], { type: 'text/plain' });
                 });
               } else {
                 newItem[type] = item.getType(type);
@@ -1349,8 +1479,45 @@
     }, 0);
   }
 
+  function onGeminiCopyButtonClick(e) {
+    if (!e.target || !e.target.closest || !/https:\/\/gemini\.google\.com\//.test(String(window.location && window.location.href || ''))) {
+      return;
+    }
+    var button = e.target.closest('button[data-test-id="copy-button"][aria-label="Copy"]');
+    if (!button) return;
+    var responseRoot = button.closest('response-container, .response-container');
+    if (!responseRoot) return;
+    var contentRoot = responseRoot.querySelector('structured-content-container .markdown')
+      || responseRoot.querySelector('message-content .markdown')
+      || responseRoot.querySelector('.response-content .markdown')
+      || responseRoot.querySelector('.markdown');
+    if (!contentRoot) return;
+
+    e.preventDefault();
+    e.stopImmediatePropagation();
+
+    setTimeout(function () {
+      copyStructuredContentRoot(contentRoot, responseRoot, 'data-copy-cleaner-gemini-copy');
+    }, 0);
+  }
+
+  function onAiStudioCopyMarkdownClick(e) {
+    if (!e.target || !e.target.closest || !/https:\/\/aistudio\.google\.com\//.test(String(window.location && window.location.href || ''))) {
+      return;
+    }
+    var menuItem = e.target.closest('[role="menuitem"]');
+    var label = String(menuItem && (menuItem.innerText || menuItem.textContent || '') || '').trim();
+    if (!menuItem || !/copy as markdown/i.test(label)) return;
+
+    setTimeout(function () {
+      copyAiStudioMarkdownFromClipboard('data-copy-cleaner-aistudio-copy');
+    }, 80);
+  }
+
   window.addEventListener('copy', onCopy, true);
   window.addEventListener('keydown', onKeydown, true);
   window.addEventListener('click', onChatGptCopyButtonClick, true);
+  window.addEventListener('click', onGeminiCopyButtonClick, true);
   window.addEventListener('click', onTikaCopyButtonClick, true);
+  window.addEventListener('click', onAiStudioCopyMarkdownClick, true);
 })();
