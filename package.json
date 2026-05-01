@@ -5,14 +5,14 @@
   "private": true,
   "scripts": {
     "test": "node --test ./tests/*.test.cjs",
-    "copycleaner:chatgpt": "node scripts/copy-cleaner-chatgpt-runner.js",
-    "copycleaner:realtest": "node scripts/copy-cleaner-chatgpt-runner.js --case chatgpt-markdown-fixture-page",
-    "copycleaner:prompttest": "node scripts/copy-cleaner-chatgpt-runner.js --case chatgpt-basic-cleanup",
-    "feishu:realtest": "node scripts/feishu-real-test-runner.js",
-    "tampermonkey:sync": "node scripts/tampermonkey-sync-cli.cjs"
+    "copycleaner:chatgpt": "node automation/copy-cleaner-chatgpt-runner.js",
+    "copycleaner:realtest": "node automation/copy-cleaner-chatgpt-runner.js --case chatgpt-markdown-fixture-page",
+    "copycleaner:prompttest": "node automation/copy-cleaner-chatgpt-runner.js --case chatgpt-basic-cleanup",
+    "feishu:realtest": "node automation/feishu-real-test-runner.js",
+    "tampermonkey:sync": "node bin/tampermonkey-sync-cli.cjs"
   },
   "bin": {
-    "tampermonkey-sync": "./scripts/tampermonkey-sync-cli.cjs"
+    "tampermonkey-sync": "./bin/tampermonkey-sync-cli.cjs"
   },
   "devDependencies": {
     "@playwright/test": "^1.59.1"

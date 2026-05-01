@@ -6,7 +6,7 @@ const {
   DEFAULT_CDP_ENDPOINT,
   DEFAULT_TAMPERMONKEY_EXTENSION_ID,
   syncUserscriptToTampermonkey,
-} = require('./tampermonkey-cdp-utils.cjs');
+} = require('../lib/tampermonkey-cdp-utils.cjs');
 
 function parseCliArgs(argv) {
   var result = {};
@@ -30,7 +30,7 @@ function buildHelpText() {
     'Tampermonkey userscript sync CLI',
     '',
     'Usage:',
-    '  node scripts/tampermonkey-sync-cli.cjs --script-path <path> [options]',
+    '  node bin/tampermonkey-sync-cli.cjs --script-path <path> [options]',
     '',
     'Options:',
     '  --script-path <path>    Local userscript file to import into Tampermonkey',
@@ -40,8 +40,8 @@ function buildHelpText() {
     '  --help                  Show this message',
     '',
     'Examples:',
-    '  node scripts/tampermonkey-sync-cli.cjs --script-path scripts/copy-cleaner.user.js',
-    '  node scripts/tampermonkey-sync-cli.cjs --script-path scripts/feishu-helper.user.js --cdp-url http://127.0.0.1:9222',
+    '  node bin/tampermonkey-sync-cli.cjs --script-path userscripts/copy-cleaner.user.js',
+    '  node bin/tampermonkey-sync-cli.cjs --script-path userscripts/feishu-helper.user.js --cdp-url http://127.0.0.1:9222',
   ].join('\n');
 }
 

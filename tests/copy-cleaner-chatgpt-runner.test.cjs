@@ -4,11 +4,11 @@ const assert = require('node:assert/strict');
 const {
   DEFAULT_CHATGPT_CASE_ID,
   getChatGPTRealTestCase,
-} = require('../scripts/copy-cleaner-chatgpt-cases.cjs');
+} = require('../automation/copy-cleaner-chatgpt-cases.cjs');
 const {
   buildTextMismatchSummary,
   parseCliArgs,
-} = require('../scripts/copy-cleaner-chatgpt-runner.js');
+} = require('../automation/copy-cleaner-chatgpt-runner.js');
 
 test('chatgpt real test exposes the default standard case', () => {
   const testCase = getChatGPTRealTestCase(DEFAULT_CHATGPT_CASE_ID);

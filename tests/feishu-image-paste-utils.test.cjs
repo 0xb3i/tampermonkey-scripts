@@ -5,7 +5,7 @@ const path = require('node:path');
 
 const {
   downgradeStructuredImagesForPaste,
-} = require('../scripts/feishu-image-paste-utils.cjs');
+} = require('../lib/feishu-image-paste-utils.cjs');
 
 test('downgradeStructuredImagesForPaste removes image records and strips structured attrs from base64 image figures', () => {
   const originalRecord = {
@@ -111,18 +111,18 @@ test('downgradeStructuredImagesForPaste keeps non-base64 image html untouched wh
 });
 
 test('userscript preserves downgraded image marker during clipboard html sanitization', () => {
-  const source = fs.readFileSync(path.join(__dirname, '../scripts/feishu-helper.user.js'), 'utf8');
+  const source = fs.readFileSync(path.join(__dirname, '../userscripts/feishu-helper.user.js'), 'utf8');
   assert.match(source, /'data-feishu-downgraded-images'\s*:\s*true/);
 });
 
 test('userscript resolves wiki obj_token with the GET get_node endpoint', () => {
-  const source = fs.readFileSync(path.join(__dirname, '../scripts/feishu-helper.user.js'), 'utf8');
+  const source = fs.readFileSync(path.join(__dirname, '../userscripts/feishu-helper.user.js'), 'utf8');
   assert.match(source, /\/space\/api\/wiki\/v2\/tree\/get_node\/\?wiki_token=/);
   assert.doesNotMatch(source, /_originalFetch\('\/space\/api\/wiki\/v2\/tree\/get_node\/', \{\s*method:\s*'POST'/);
 });
 
 test('userscript opts into Tampermonkey shared storage APIs for cross-subdomain pending paste sync', () => {
-  const source = fs.readFileSync(path.join(__dirname, '../scripts/feishu-helper.user.js'), 'utf8');
+  const source = fs.readFileSync(path.join(__dirname, '../userscripts/feishu-helper.user.js'), 'utf8');
   assert.match(source, /\/\/ @grant\s+GM_getValue/);
   assert.match(source, /\/\/ @grant\s+GM_setValue/);
   assert.match(source, /\/\/ @grant\s+GM_deleteValue/);
@@ -131,7 +131,7 @@ test('userscript opts into Tampermonkey shared storage APIs for cross-subdomain 
 });
 
 test('userscript clears stale uploaded token maps when a newer pending paste payload is loaded', () => {
-  const source = fs.readFileSync(path.join(__dirname, '../scripts/feishu-helper.user.js'), 'utf8');
+  const source = fs.readFileSync(path.join(__dirname, '../userscripts/feishu-helper.user.js'), 'utf8');
   assert.match(source, /var _uploadedTokenMapPendingTs = 0;/);
   assert.match(source, /function ensureUploadedTokenMapMatchesPending\(/);
   assert.match(source, /stale-uploaded-token-map-cleared/);

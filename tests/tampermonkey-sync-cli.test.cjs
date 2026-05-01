@@ -5,15 +5,15 @@ const rootExports = require('../index.js');
 const {
   buildHelpText,
   parseCliArgs,
-} = require('../scripts/tampermonkey-sync-cli.cjs');
+} = require('../bin/tampermonkey-sync-cli.cjs');
 
 test('tampermonkey sync cli parses boolean flags and key-value pairs', () => {
   assert.deepEqual(parseCliArgs([
-    '--script-path', './scripts/copy-cleaner.user.js',
+    '--script-path', './userscripts/copy-cleaner.user.js',
     '--json',
     '--cdp-url', 'http://127.0.0.1:9222',
   ]), {
-    'script-path': './scripts/copy-cleaner.user.js',
+    'script-path': './userscripts/copy-cleaner.user.js',
     json: true,
     'cdp-url': 'http://127.0.0.1:9222',
   });

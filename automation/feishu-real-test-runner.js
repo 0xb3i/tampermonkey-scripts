@@ -4,16 +4,16 @@ const { resolve } = require('path');
 
 const {
   buildSnapshotSignature,
-} = require('./feishu-paste-fallback-utils.cjs');
+} = require('../lib/feishu-paste-fallback-utils.cjs');
 const {
   DEFAULT_CDP_ENDPOINT,
   connectToChromeOverCDP,
   navigateCurrentTab,
   syncUserscriptInBrowser,
   waitForDocumentReady,
-} = require('./tampermonkey-cdp-utils.cjs');
+} = require('../lib/tampermonkey-cdp-utils.cjs');
 
-const DEFAULT_SCRIPT_PATH = resolve(__dirname, 'feishu-helper.user.js');
+const DEFAULT_SCRIPT_PATH = resolve(__dirname, '../userscripts/feishu-helper.user.js');
 const DEFAULT_ACTION = 'realTestDuplicateDocument';
 const DEFAULT_TIMEOUT_MS = 45000;
 const DEFAULT_SHORT_WAIT_MS = 1200;

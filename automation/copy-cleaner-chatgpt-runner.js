@@ -8,14 +8,14 @@ const {
   getPrimaryContext,
   navigateCurrentTab,
   syncUserscriptInBrowser,
-} = require('./tampermonkey-cdp-utils.cjs');
+} = require('../lib/tampermonkey-cdp-utils.cjs');
 const {
   DEFAULT_CHATGPT_CASE_ID,
   getChatGPTRealTestCase,
   listChatGPTRealTestCases,
 } = require('./copy-cleaner-chatgpt-cases.cjs');
 
-const DEFAULT_SCRIPT_PATH = resolve(__dirname, 'copy-cleaner.user.js');
+const DEFAULT_SCRIPT_PATH = resolve(__dirname, '../userscripts/copy-cleaner.user.js');
 const DEFAULT_URL = 'https://chatgpt.com/';
 
 function parseCliArgs(argv) {

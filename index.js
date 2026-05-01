@@ -1,1 +1,1 @@
-module.exports = require('./scripts/tampermonkey-cdp-utils.cjs');
+module.exports = require('./lib/tampermonkey-cdp-utils.cjs');

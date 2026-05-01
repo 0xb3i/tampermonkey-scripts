@@ -5,7 +5,7 @@ const {
   assertAutomationResult,
   isFeishuDocUrl,
   parseCliArgs,
-} = require('../scripts/feishu-real-test-runner.js');
+} = require('../automation/feishu-real-test-runner.js');
 
 test('isFeishuDocUrl accepts supported Feishu document URLs', () => {
   assert.equal(isFeishuDocUrl('https://bytedance.feishu.cn/docx/abc123'), true);

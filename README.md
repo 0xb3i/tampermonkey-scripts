@@ -2,13 +2,21 @@
 
 油猴脚本集合，提升网页浏览体验。
 
+## 目录结构
+
+- `userscripts/`：实际安装到 Tampermonkey 的 userscript
+- `lib/`：CDP 同步、站点粘贴验证等可复用库
+- `automation/`：真实浏览器回归 runner 与 oracle case
+- `bin/`：命令行入口
+- `tests/`：低成本单测
+
 ## 脚本列表
 
 ### 飞书文档助手
 
 解除飞书文档复制限制，1:1 复刻飞书文档。允许在无复制权限的页面中右键复制图片。
 
-**安装：** 将 [scripts/feishu-helper.user.js](scripts/feishu-helper.user.js) 的内容添加到 Tampermonkey 新脚本中。
+**安装：** 将 [userscripts/feishu-helper.user.js](userscripts/feishu-helper.user.js) 的内容添加到 Tampermonkey 新脚本中。
 
 **适用页面：** `feishu.cn`、`larksuite.com`、`larkoffice.com` 下的所有页面
 
@@ -46,7 +54,7 @@
 
 复制时自动清理 AI 生成内容中的格式噪音，并将网页前端复制数学公式得到的 Unicode 乱码转化为 LaTeX 格式。
 
-**安装：** 将 [scripts/copy-cleaner.user.js](scripts/copy-cleaner.user.js) 的内容添加到 Tampermonkey 新脚本中。
+**安装：** 将 [userscripts/copy-cleaner.user.js](userscripts/copy-cleaner.user.js) 的内容添加到 Tampermonkey 新脚本中。
 
 #### 功能
 
@@ -69,7 +77,7 @@ npm run copycleaner:realtest
 该命令会自动完成：
 
 1. 连接 `http://127.0.0.1:9222`
-2. 把本地 `scripts/copy-cleaner.user.js` 同步进 Tampermonkey
+2. 把本地 `userscripts/copy-cleaner.user.js` 同步进 Tampermonkey
 3. 在当前标签页打开 `https://chatgpt.com/`
 4. 发送固定提示词，并点击 ChatGPT 官方回复 copy 按钮
 5. 读取系统剪贴板，校验结果是否为 `AI公式在 $x^2$ 里`
@@ -83,13 +91,13 @@ npm run copycleaner:realtest
 查看当前内置真实 case：
 
 ```bash
-node scripts/copy-cleaner-chatgpt-runner.js --list-cases
+node automation/copy-cleaner-chatgpt-runner.js --list-cases
 ```
 
 如果要自定义目标页面或断言文本，也可以直接运行：
 
 ```bash
-node scripts/copy-cleaner-chatgpt-runner.js \
+node automation/copy-cleaner-chatgpt-runner.js \
   --case chatgpt-basic-cleanup \
   --url https://chatgpt.com/ \
   --expected 'AI公式在 $x^2$ 里'
@@ -167,11 +175,11 @@ agent-browser connect 9222
 
 ### 通用 Tampermonkey 同步
 
-- `scripts/tampermonkey-cdp-utils.cjs` 提供了基于 CDP 的通用同步能力。
+- `lib/tampermonkey-cdp-utils.cjs` 提供了基于 CDP 的通用同步能力。
 - 推荐直接使用 CLI：
 
 ```bash
-npm run tampermonkey:sync -- --script-path scripts/copy-cleaner.user.js
+npm run tampermonkey:sync -- --script-path userscripts/copy-cleaner.user.js
 ```
 
 - 查看帮助：
@@ -186,7 +194,7 @@ npm run tampermonkey:sync -- --help
 Tampermonkey userscript sync CLI
 
 Usage:
-  node scripts/tampermonkey-sync-cli.cjs --script-path <path> [options]
+  node bin/tampermonkey-sync-cli.cjs --script-path <path> [options]
 
 Options:
   --script-path <path>    Local userscript file to import into Tampermonkey
@@ -202,9 +210,9 @@ Options:
 const { syncUserscriptToTampermonkey } = require('./index.js');
 
 await syncUserscriptToTampermonkey({
-  scriptPath: './scripts/copy-cleaner.user.js',
+  scriptPath: './userscripts/copy-cleaner.user.js',
   cdpUrl: 'http://127.0.0.1:9222',
 });
 ```
 
-- 当前 `scripts/copy-cleaner-chatgpt-runner.js`、`scripts/feishu-real-test-runner.js` 等真实站点验证脚本已直接复用这套统一同步入口。
+- 当前 `automation/copy-cleaner-chatgpt-runner.js`、`automation/feishu-real-test-runner.js` 等真实站点验证脚本已直接复用这套统一同步入口。

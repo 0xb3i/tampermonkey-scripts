@@ -5,7 +5,7 @@ const path = require('node:path');
 const vm = require('node:vm');
 
 function loadCopyCleanerExports() {
-  const filePath = path.join(__dirname, '../scripts/copy-cleaner.user.js');
+  const filePath = path.join(__dirname, '../userscripts/copy-cleaner.user.js');
   const source = fs.readFileSync(filePath, 'utf8');
   const instrumented = source.replace(
     /\}\)\(\);\s*$/,
@@ -136,7 +136,7 @@ test('copy cleaner preserves fenced code blocks when normalizing markdown clipbo
 });
 
 test('copy cleaner removes old debug globals but keeps dual copy entry points', () => {
-  const source = fs.readFileSync(path.join(__dirname, '../scripts/copy-cleaner.user.js'), 'utf8');
+  const source = fs.readFileSync(path.join(__dirname, '../userscripts/copy-cleaner.user.js'), 'utf8');
 
   assert.doesNotMatch(source, /__copyCleanerCleanText/);
   assert.doesNotMatch(source, /__copyCleanerSplitByLatex/);

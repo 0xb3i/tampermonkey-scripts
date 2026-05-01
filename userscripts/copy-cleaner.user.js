@@ -1048,11 +1048,6 @@
     if (dataTurn !== 'assistant' && !/复制回复|copy response/i.test(ariaLabel)) return;
     if (!turn || !turn.querySelector) return;
 
-    // #region debug-point A:click-entry
-    var reportDebug = function (hypothesisId, msg, data) { fetch('http://127.0.0.1:7777/event', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ sessionId: 'chatgpt-link-restore', runId: 'pre-fix', hypothesisId: hypothesisId, location: 'copy-cleaner.user.js:onChatGptCopyButtonClick', msg: '[DEBUG] ' + msg, data: data || {}, ts: Date.now() }) }).catch(function () {}); };
-    reportDebug('A', 'copy-click-enter', { ariaLabel: ariaLabel, dataTurn: dataTurn, turnTestId: String(turn.getAttribute('data-testid') || ''), decoratedHrefCount: turn.querySelectorAll('a.decorated-link[href]').length, decoratedNoHrefCount: turn.querySelectorAll('a.decorated-link:not([href])').length });
-    // #endregion
-
     e.preventDefault();
     e.stopImmediatePropagation();
 
@@ -1072,13 +1067,7 @@
       restoredText = restoreMarkdownLinksFromSourceText(restoredText, turn);
       restoredText = restoreMarkdownLinksFromSourceText(restoredText, document);
       var hasPendingDecoratedLinks = !!turn.querySelector('a.decorated-link:not([href])');
-      // #region debug-point B:attempt-state
-      reportDebug('B', 'finalize-attempt', { attempt: attempt, contentRootDecoratedHrefCount: contentRoot.querySelectorAll('a.decorated-link[href]').length, contentRootDecoratedNoHrefCount: contentRoot.querySelectorAll('a.decorated-link:not([href])').length, turnDecoratedHrefCount: turn.querySelectorAll('a.decorated-link[href]').length, turnDecoratedNoHrefCount: turn.querySelectorAll('a.decorated-link:not([href])').length, documentDecoratedHrefCount: document.querySelectorAll('a.decorated-link[href]').length, textHasPlainBaidu: text.indexOf('- 链接：百度') !== -1, restoredHasMarkdownBaidu: restoredText.indexOf('[百度](https://www.baidu.com)') !== -1 });
-      // #endregion
       if (restoredText === text && hasPendingDecoratedLinks && attempt < 5) {
-        // #region debug-point C:retry
-        reportDebug('C', 'retry-scheduled', { attempt: attempt, nextAttempt: attempt + 1, pendingDecoratedLinks: true });
-        // #endregion
         setTimeout(function () {
           finalizeCopy(attempt + 1);
         }, 50);
@@ -1090,9 +1079,6 @@
       withClipboardCleanBypass(function () {
         return navigator.clipboard.writeText(text);
       }).then(function () {
-        // #region debug-point D:clipboard-write
-        reportDebug('D', 'clipboard-written', { attempt: attempt, finalHasMarkdownBaidu: text.indexOf('[百度](https://www.baidu.com)') !== -1, finalHasPlainBaidu: text.indexOf('- 链接：百度') !== -1, finalLength: text.length });
-        // #endregion
         try {
           document.documentElement.setAttribute('data-copy-cleaner-chatgpt-copy', text);
           document.documentElement.setAttribute('data-copy-cleaner-chatgpt-copy-length', String(text.length));
