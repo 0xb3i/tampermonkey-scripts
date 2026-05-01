@@ -9,6 +9,7 @@ const {
   buildTextMismatchSummary,
   parseCliArgs,
 } = require('../automation/copy-cleaner-chatgpt-runner.js');
+const { buildExactTextMismatchSummary } = require('../automation/copy-cleaner-runner-utils.cjs');
 
 test('chatgpt real test exposes the default standard case', () => {
   const testCase = getChatGPTRealTestCase(DEFAULT_CHATGPT_CASE_ID);
@@ -55,6 +56,33 @@ test('buildTextMismatchSummary reports exact match when texts are equal after no
   );
 });
 
+test('buildTextMismatchSummary ignores blank lines globally', () => {
+  assert.deepEqual(
+    buildTextMismatchSummary('foo\n\nbar\n\nbaz', 'foo\nbar\nbaz'),
+    {
+      matches: true,
+      firstDiffIndex: -1,
+      expectedFragment: '',
+      actualFragment: '',
+    }
+  );
+});
+
+test('buildTextMismatchSummary preserves a blank line only after markdown tables', () => {
+  assert.deepEqual(
+    buildTextMismatchSummary(
+      '| a | b |\n| --- | --- |\n| 1 | 2 |\n\n后文',
+      '| a | b |\n| --- | --- |\n| 1 | 2 |\n后文'
+    ),
+    {
+      matches: false,
+      firstDiffIndex: 34,
+      expectedFragment: '|\n| 1 | 2 |\n\n后文',
+      actualFragment: '|\n| 1 | 2 |\n后文',
+    }
+  );
+});
+
 test('buildTextMismatchSummary can ignore footnote lines for real browser oracle comparison', () => {
   assert.deepEqual(
     buildTextMismatchSummary(
@@ -67,6 +95,18 @@ test('buildTextMismatchSummary can ignore footnote lines for real browser oracle
       firstDiffIndex: -1,
       expectedFragment: '',
       actualFragment: '',
+    }
+  );
+});
+
+test('buildExactTextMismatchSummary keeps extra blank lines visible', () => {
+  assert.deepEqual(
+    buildExactTextMismatchSummary('foo\nbar', 'foo\n\nbar'),
+    {
+      matches: false,
+      firstDiffIndex: 4,
+      expectedFragment: 'foo\nbar',
+      actualFragment: 'foo\n\nbar',
     }
   );
 });

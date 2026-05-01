@@ -64,7 +64,7 @@ const CHATGPT_REAL_TEST_CASES = {
       '## 水平线：',
       '---',
       '数学公式：',
-      '行内公式：$E=mc^2$',
+      '行内公式： $E=mc^2$',
       '块级公式：',
       '$$\\int_0^\\infty e^{-x^2} dx = \\frac{\\sqrt{\\pi}}{2}$$',
       '---',
@@ -79,7 +79,6 @@ const CHATGPT_REAL_TEST_CASES = {
     useExistingAssistantReply: false,
     promptText: [
       '请只回复下面这一行，完全按原样输出，不要解释，不要代码块：',
-      '',
       '**AI**（人工智能）“公式”在$x^2$里',
     ].join('\n'),
     expectedText: 'AI公式在 $x^2$ 里',

@@ -10,6 +10,7 @@ const {
   syncUserscriptInBrowser,
 } = require('../lib/tampermonkey-cdp-utils.cjs');
 const {
+  buildExactTextMismatchSummary,
   buildTextMismatchSummary,
   ensureClipboardPermission,
   normalizeText,
@@ -42,19 +43,60 @@ async function clickCopyAsMarkdown(page) {
   };
 }
 
+async function readAiStudioCopyState(page) {
+  return await page.evaluate(async function () {
+    return {
+      pageMarker: document.documentElement.getAttribute('data-copy-cleaner-aistudio-copy') || '',
+      clipboardText: navigator.clipboard && navigator.clipboard.readText
+        ? await navigator.clipboard.readText().catch(function () { return ''; })
+        : '',
+      menuOpen: !!document.querySelector('[role="menu"]'),
+    };
+  });
+}
+
 async function validateAiStudioCopy(page, options) {
   var expectedText = options && options.expectedText ? String(options.expectedText) : '';
   var ignoreLinePatterns = options && Array.isArray(options.ignoreLinePatterns) ? options.ignoreLinePatterns : [];
   var requirePageMarker = !!(options && options.requirePageMarker);
   await waitForExistingAssistantReplyReady(page);
+  var previousClipboard = '__copycleaner_aistudio_sentinel__';
+  await page.evaluate(async function (sentinel) {
+    document.documentElement.removeAttribute('data-copy-cleaner-aistudio-copy');
+    var selection = window.getSelection && window.getSelection();
+    if (selection) selection.removeAllRanges();
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      await navigator.clipboard.writeText(sentinel);
+    }
+  }, previousClipboard);
   var clickedTarget = await clickCopyAsMarkdown(page);
-  await page.waitForTimeout(800);
-  var clipboardText = normalizeText(await readClipboardText(page), ignoreLinePatterns);
-  var pageMarker = normalizeText(await page.evaluate(function () {
+  await page.waitForTimeout(700);
+  var observedState = await readAiStudioCopyState(page);
+  var waitSatisfied = !!(observedState.pageMarker || (observedState.clipboardText && observedState.clipboardText !== previousClipboard));
+  if (!waitSatisfied) {
+    clickedTarget = await clickCopyAsMarkdown(page);
+    await page.waitForTimeout(700);
+    observedState = await readAiStudioCopyState(page);
+    waitSatisfied = !!(observedState.pageMarker || (observedState.clipboardText && observedState.clipboardText !== previousClipboard));
+  }
+  await page.waitForTimeout(200);
+  var rawClipboardText = String(await readClipboardText(page) || '');
+  var rawPageMarker = String(await page.evaluate(function () {
     return document.documentElement.getAttribute('data-copy-cleaner-aistudio-copy') || '';
-  }), ignoreLinePatterns);
+  }) || '');
+  var clipboardText = normalizeText(rawClipboardText, ignoreLinePatterns);
+  var pageMarker = normalizeText(rawPageMarker, ignoreLinePatterns);
   var actualText = pageMarker || clipboardText;
-  expectedText = normalizeText(expectedText, ignoreLinePatterns);
+  var rawActualText = rawPageMarker || rawClipboardText;
+  var normalizedExpectedText = normalizeText(expectedText, ignoreLinePatterns);
+  var exactMismatch = requirePageMarker && !rawPageMarker
+    ? {
+        matches: false,
+        firstDiffIndex: 0,
+        expectedFragment: '[copy-cleaner marker expected]',
+        actualFragment: '[missing marker; native clipboard path used]',
+      }
+    : buildExactTextMismatchSummary(expectedText, rawActualText);
   var mismatch = requirePageMarker && !pageMarker
     ? {
         matches: false,
@@ -62,16 +104,20 @@ async function validateAiStudioCopy(page, options) {
         expectedFragment: '[copy-cleaner marker expected]',
         actualFragment: '[missing marker; native clipboard path used]',
       }
-    : buildTextMismatchSummary(expectedText, actualText, ignoreLinePatterns);
+    : buildTextMismatchSummary(normalizedExpectedText, actualText, ignoreLinePatterns);
   return {
-    expectedText: expectedText,
+    expectedText: normalizedExpectedText,
     clickedTarget: clickedTarget,
+    rawPageMarker: rawPageMarker,
     pageMarker: pageMarker,
+    rawClipboardText: rawClipboardText,
     clipboardText: clipboardText,
+    rawEffectiveText: rawActualText,
     effectiveText: actualText,
     usedPageMarker: !!pageMarker,
+    exactMismatch: exactMismatch,
     mismatch: mismatch,
-    matches: mismatch.matches,
+    matches: mismatch.matches && exactMismatch.matches,
   };
 }
 
@@ -89,16 +135,16 @@ async function runCopyCleanerAiStudioRealTest(options) {
     var syncStep = await syncUserscriptInBrowser(browser, {
       scriptPath: scriptPath,
     });
-    var page = syncStep.page;
+    var page = await context.newPage();
     var originalUrl = syncStep.previousUrl;
     var syncResult = syncStep.sync;
     console.log('[copy-cleaner-aistudio-runner] sync:done');
 
     console.log('[copy-cleaner-aistudio-runner] page:navigate');
+    await page.bringToFront().catch(function () {});
     await page.setViewportSize({ width: 1440, height: 1400 }).catch(function () {});
     await navigateCurrentTab(page, targetUrl);
     await ensureClipboardPermission(context, new URL(targetUrl).origin);
-    await page.reload({ waitUntil: 'domcontentloaded' });
     await page.setViewportSize({ width: 1440, height: 1400 }).catch(function () {});
     console.log('[copy-cleaner-aistudio-runner] page:ready');
 
@@ -121,11 +167,14 @@ async function runCopyCleanerAiStudioRealTest(options) {
     console.log(JSON.stringify(result, null, 2));
 
     if (!validationResult.matches) {
+      var failure = validationResult.exactMismatch && !validationResult.exactMismatch.matches
+        ? validationResult.exactMismatch
+        : validationResult.mismatch;
       throw new Error(
         'Clipboard text did not match expected cleaned output. ' +
-        'firstDiffIndex=' + validationResult.mismatch.firstDiffIndex +
-        ' expectedFragment=' + JSON.stringify(validationResult.mismatch.expectedFragment) +
-        ' actualFragment=' + JSON.stringify(validationResult.mismatch.actualFragment)
+        'firstDiffIndex=' + failure.firstDiffIndex +
+        ' expectedFragment=' + JSON.stringify(failure.expectedFragment) +
+        ' actualFragment=' + JSON.stringify(failure.actualFragment)
       );
     }
     return result;

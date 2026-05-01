@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         复制净化器
 // @namespace    https://github.com/tampermonkey-scripts
-// @version      5.0.10
+// @version      5.0.12
 // @description  复制时自动去除加粗/括号/引号，并将数学公式提取为 LaTeX $$ 格式，兼容网站自带复制按钮
 // @author       beibei
 // @match        *://*/*
@@ -111,6 +111,50 @@
     return parts.join('');
   }
 
+  function compactNonTableBlankLinesOutsideCode(text) {
+    var lines = String(text || '').split('\n');
+    var result = [];
+    function isTableLine(line) {
+      return /^\|.*\|$/.test(String(line || '').trim());
+    }
+    for (var i = 0; i < lines.length; i++) {
+      var line = lines[i];
+      if (String(line || '').trim() !== '') {
+        result.push(line);
+        continue;
+      }
+      var prev = result.length ? result[result.length - 1] : '';
+      var next = '';
+      for (var j = i + 1; j < lines.length; j++) {
+        if (String(lines[j] || '').trim() !== '') {
+          next = lines[j];
+          break;
+        }
+      }
+      if (isTableLine(prev) && next && !isTableLine(next) && result[result.length - 1] !== '') {
+        result.push('');
+      }
+    }
+    return result.join('\n');
+  }
+
+  function compactNonTableBlankLines(text) {
+    var parts = String(text || '').split(/(```[\s\S]*?```)/g);
+    for (var i = 0; i < parts.length; i += 2) {
+      parts[i] = compactNonTableBlankLinesOutsideCode(parts[i]);
+    }
+    var result = '';
+    for (var j = 0; j < parts.length; j++) {
+      var part = parts[j];
+      if (!part) continue;
+      var isFence = j % 2 === 1;
+      if (isFence && result && !/\n$/.test(result)) result += '\n';
+      result += part;
+      if (isFence && j < parts.length - 1 && parts[j + 1] && !/^\n/.test(parts[j + 1])) result += '\n';
+    }
+    return result;
+  }
+
   function cleanStructuredMarkdownStyles(text) {
     var parts = String(text || '').split(/(```[\s\S]*?```|`[^`\n]+`)/g);
     for (var i = 0; i < parts.length; i += 2) {
@@ -161,7 +205,9 @@
   }
 
   function normalizeStructuredMarkdownForPaste(text) {
-    var lines = String(text || '').replace(/\r\n?/g, '\n').split('\n');
+    var lines = compactNonTableBlankLines(
+      normalizeInlineLatexSpacing(String(text || '').replace(/\r\n?/g, '\n'))
+    ).split('\n');
     var result = [];
     function isTableLine(line) {
       return /^\|.*\|$/.test(String(line || '').trim());
@@ -181,6 +227,35 @@
       }
     }
     return result.join('\n');
+  }
+
+  function normalizeInlineLatexSpacing(text) {
+    var codeAwareParts = String(text || '').split(/(```[\s\S]*?```|`[^`\n]+`)/g);
+    for (var i = 0; i < codeAwareParts.length; i += 2) {
+      codeAwareParts[i] = normalizeInlineLatexSpacingOutsideCode(codeAwareParts[i]);
+    }
+    return codeAwareParts.join('');
+  }
+
+  function normalizeInlineLatexSpacingOutsideCode(text) {
+    var parts = splitByLatex(String(text || ''));
+    var result = '';
+    for (var i = 0; i < parts.length; i++) {
+      var part = parts[i];
+      if (!part.latex || !/^\$[^$\n]+?\$$/.test(part.text)) {
+        result += part.text;
+        continue;
+      }
+      if (result && /\S$/.test(result)) {
+        result += ' ';
+      }
+      result += part.text;
+      var nextPart = i + 1 < parts.length ? parts[i + 1] : null;
+      if (nextPart && !nextPart.latex && /^\S/.test(nextPart.text || '')) {
+        result += ' ';
+      }
+    }
+    return result;
   }
 
   function normalizeAiStudioMarkdownForPaste(text) {
@@ -246,7 +321,8 @@
     if (/^(BUTTON|MAT-ICON|SVG|PATH)$/.test(node.tagName)) return true;
     var className = String(node.className || '');
     return /(^|\s)(buttons?|actions-container|projected-actions-wrapper|copy-button|download-button|toggle-edit-button|rerun-button|mat-mdc-tooltip-trigger)(\s|$)/.test(className) ||
-      /code-block-decoration|header-formatted|table-block has-export-button|export-button/i.test(className);
+      /code-block-decoration|header-formatted/i.test(className) ||
+      /(^|\s)export-button(\s|$)/i.test(className);
   }
 
   function getRenderedText(node) {
@@ -523,6 +599,11 @@
     }
 
     if (node.tagName === 'CODE') {
+      var formulaOnlyText = extractFormulaOnlyText(node);
+      if (formulaOnlyText) {
+        parts.push(formulaOnlyText);
+        return;
+      }
       parts.push(formatInlineCode(getRenderedText(node) || node.textContent));
       return;
     }
@@ -581,6 +662,8 @@
       return '\n';
     }
     if (node.nodeType === Node.ELEMENT_NODE && node.tagName === 'CODE') {
+      var formulaCodeText = extractFormulaOnlyText(node);
+      if (formulaCodeText) return formulaCodeText;
       return formatInlineCode(getRenderedText(node) || node.textContent);
     }
     if (node.nodeType === Node.ELEMENT_NODE && node.tagName === 'IMG') {
@@ -610,6 +693,16 @@
       if (matches[i].length > longest) longest = matches[i].length;
     }
     return new Array(longest + 2).join('`');
+  }
+
+  function extractFormulaOnlyText(node) {
+    if (!node) return '';
+    var text = getPreformattedText(node).replace(/\r\n?/g, '\n').trim();
+    if (!text) text = getRenderedText(node).replace(/\r\n?/g, '\n').trim();
+    if (!text) return '';
+    if (/^\$[^$\n]+?\$$/.test(text)) return text;
+    if (/^\$\$[\s\S]*\$\$$/.test(text)) return text;
+    return '';
   }
 
   function looksLikeCodeLine(line) {
@@ -868,6 +961,11 @@
     }
 
     if (node.tagName === 'CODE') {
+      var codeFormulaText = extractFormulaOnlyText(node);
+      if (codeFormulaText) {
+        appendStructuredLiteralText(state, codeFormulaText);
+        return;
+      }
       if ((node.querySelector && node.querySelector('br')) || /\n/.test(getPreformattedText(node))) {
         var blockCodeText = getPreformattedText(node).replace(/\n$/, '');
         var blockFence = getCodeFence(blockCodeText);
@@ -983,6 +1081,15 @@
     }
 
     if (node.tagName === 'PRE') {
+      var preFormulaText = extractFormulaOnlyText(node);
+      if (preFormulaText) {
+        if (/^\$\$[\s\S]*\$\$$/.test(preFormulaText)) {
+          appendStructuredBlock(state, preFormulaText);
+        } else {
+          appendStructuredLiteralText(state, preFormulaText);
+        }
+        return;
+      }
       var codeChild = node.querySelector ? node.querySelector('code') : null;
       if (codeChild) {
         var codeBlock = extractPreformattedCodeBlock(node, codeChild);

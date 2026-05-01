@@ -9,7 +9,7 @@ function loadCopyCleanerExports() {
   const source = fs.readFileSync(filePath, 'utf8');
   const instrumented = source.replace(
     /\}\)\(\);\s*$/,
-    "window.__copyCleanerTestExports = { cleanText: cleanText, splitByLatex: splitByLatex, normalizeClipboardText: normalizeClipboardText, normalizeStructuredMarkdownForPaste: normalizeStructuredMarkdownForPaste, buildClipboardPayloadFromSelection: buildClipboardPayloadFromSelection, serializeStructuredFragment: serializeStructuredFragment, extractFragmentText: extractFragmentText };})();"
+    "window.__copyCleanerTestExports = { cleanText: cleanText, splitByLatex: splitByLatex, normalizeClipboardText: normalizeClipboardText, normalizeStructuredMarkdownForPaste: normalizeStructuredMarkdownForPaste, normalizeAiStudioMarkdownForPaste: normalizeAiStudioMarkdownForPaste, buildClipboardPayloadFromSelection: buildClipboardPayloadFromSelection, serializeStructuredFragment: serializeStructuredFragment, extractFragmentText: extractFragmentText };})();"
   );
 
   if (instrumented === source) {
@@ -217,7 +217,16 @@ test('copy cleaner preserves existing markdown styling when clipboard text is al
     '*   第二项',
     '    *   子项',
   ].join('\n');
-  assert.equal(normalizeClipboardText(input), input);
+  assert.equal(
+    normalizeClipboardText(input),
+    [
+      '## 标题',
+      '这是一段 **加粗** 与 *斜体*，还有 `inline code`。',
+      '*   第一项',
+      '*   第二项',
+      '    *   子项',
+    ].join('\n')
+  );
 });
 
 test('copy cleaner inserts a blank line after markdown tables for Feishu rendering', () => {
@@ -235,6 +244,81 @@ test('copy cleaner inserts a blank line after markdown tables for Feishu renderi
       '| 张三 | 开发 | 已完成 |',
       '',
       '下面是一段包含图片语法的文本：',
+    ].join('\n')
+  );
+});
+
+test('copy cleaner adds spaces around inline latex even when punctuation is adjacent', () => {
+  const { normalizeStructuredMarkdownForPaste } = loadCopyCleanerExports();
+  assert.equal(
+    normalizeStructuredMarkdownForPaste('勾股定理可以表示为：$a^2 + b^2 = c^2$。'),
+    '勾股定理可以表示为： $a^2 + b^2 = c^2$ 。'
+  );
+});
+
+test('copy cleaner keeps inline code untouched while normalizing inline latex spacing', () => {
+  const { normalizeStructuredMarkdownForPaste } = loadCopyCleanerExports();
+  assert.equal(
+    normalizeStructuredMarkdownForPaste('代码 `$x^2$` 保持不变，但正文里$x^2$要生效。'),
+    '代码 `$x^2$` 保持不变，但正文里 $x^2$ 要生效。'
+  );
+});
+
+test('copy cleaner removes non-table blank lines from AI Studio markdown copies', () => {
+  const { normalizeAiStudioMarkdownForPaste } = loadCopyCleanerExports();
+  assert.equal(
+    normalizeAiStudioMarkdownForPaste([
+      '# 标题',
+      '',
+      '第一段',
+      '',
+      '',
+      '第二段',
+      '| a | b |',
+      '| --- | --- |',
+      '| 1 | 2 |',
+      '',
+      '表格后正文',
+    ].join('\n')),
+    [
+      '# 标题',
+      '第一段',
+      '第二段',
+      '| a | b |',
+      '| --- | --- |',
+      '| 1 | 2 |',
+      '',
+      '表格后正文',
+    ].join('\n')
+  );
+});
+
+test('copy cleaner preserves code-fence blank lines while compacting AI Studio markdown copies', () => {
+  const { normalizeAiStudioMarkdownForPaste } = loadCopyCleanerExports();
+  assert.equal(
+    normalizeAiStudioMarkdownForPaste([
+      '代码如下：',
+      '',
+      '```python',
+      'def foo():',
+      '    x = 1',
+      '',
+      '    if x:',
+      '        print(x)',
+      '```',
+      '',
+      '结束',
+    ].join('\n')),
+    [
+      '代码如下：',
+      '```python',
+      'def foo():',
+      '    x = 1',
+      '',
+      '    if x:',
+      '        print(x)',
+      '```',
+      '结束',
     ].join('\n')
   );
 });
@@ -467,6 +551,39 @@ test('copy cleaner skips empty svg placeholder images in structured serializatio
   assert.equal(
     extractFragmentText(fragment, '图片：'),
     '图片：![image](https://example.com/image.png)'
+  );
+});
+
+test('copy cleaner does not wrap latex-only pre/code blocks as code fences', () => {
+  const { serializeStructuredFragment } = loadCopyCleanerExports();
+  const fragment = createFragment([
+    createElement('UL', [
+      createElement('LI', [
+        createElement('P', [createTextNode('行内公式：')]),
+        createElement('PRE', [
+          createElement('CODE', [
+            createTextNode('$E = mc^2$'),
+          ]),
+        ]),
+      ]),
+      createElement('LI', [
+        createElement('P', [createTextNode('块级公式：')]),
+        createElement('PRE', [
+          createElement('CODE', [
+            createTextNode('$$\\sum_{i=1}^{n} i = \\frac{n(n+1)}{2}$$'),
+          ]),
+        ]),
+      ]),
+    ]),
+  ]);
+
+  assert.equal(
+    serializeStructuredFragment(fragment),
+    [
+      '- 行内公式：$E = mc^2$',
+      '- 块级公式：',
+      '$$\\sum_{i=1}^{n} i = \\frac{n(n+1)}{2}$$',
+    ].join('\n')
   );
 });
 

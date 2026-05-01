@@ -10,6 +10,7 @@ const {
   syncUserscriptInBrowser,
 } = require('../lib/tampermonkey-cdp-utils.cjs');
 const {
+  buildExactTextMismatchSummary,
   buildTextMismatchSummary,
   ensureClipboardPermission,
   normalizeText,
@@ -76,12 +77,23 @@ async function validateGeminiCopyButton(page, options) {
   await waitForExistingAssistantReplyReady(page);
   var clickedTarget = await clickLatestCopyButton(page);
   await page.waitForTimeout(500);
-  var clipboardText = normalizeText(await readClipboardText(page), ignoreLinePatterns);
-  var pageMarker = normalizeText(await page.evaluate(function () {
+  var rawClipboardText = String(await readClipboardText(page) || '');
+  var rawPageMarker = String(await page.evaluate(function () {
     return document.documentElement.getAttribute('data-copy-cleaner-gemini-copy') || '';
-  }), ignoreLinePatterns);
+  }) || '');
+  var clipboardText = normalizeText(rawClipboardText, ignoreLinePatterns);
+  var pageMarker = normalizeText(rawPageMarker, ignoreLinePatterns);
   var actualText = pageMarker || clipboardText;
-  expectedText = normalizeText(expectedText, ignoreLinePatterns);
+  var rawActualText = rawPageMarker || rawClipboardText;
+  var normalizedExpectedText = normalizeText(expectedText, ignoreLinePatterns);
+  var exactMismatch = requirePageMarker && !rawPageMarker
+    ? {
+        matches: false,
+        firstDiffIndex: 0,
+        expectedFragment: '[copy-cleaner marker expected]',
+        actualFragment: '[missing marker; native clipboard path used]',
+      }
+    : buildExactTextMismatchSummary(expectedText, rawActualText);
   var mismatch = requirePageMarker && !pageMarker
     ? {
         matches: false,
@@ -89,16 +101,20 @@ async function validateGeminiCopyButton(page, options) {
         expectedFragment: '[copy-cleaner marker expected]',
         actualFragment: '[missing marker; native clipboard path used]',
       }
-    : buildTextMismatchSummary(expectedText, actualText, ignoreLinePatterns);
+    : buildTextMismatchSummary(normalizedExpectedText, actualText, ignoreLinePatterns);
   return {
-    expectedText: expectedText,
+    expectedText: normalizedExpectedText,
     clickedTarget: clickedTarget,
+    rawPageMarker: rawPageMarker,
     pageMarker: pageMarker,
+    rawClipboardText: rawClipboardText,
     clipboardText: clipboardText,
+    rawEffectiveText: rawActualText,
     effectiveText: actualText,
     usedPageMarker: !!pageMarker,
+    exactMismatch: exactMismatch,
     mismatch: mismatch,
-    matches: mismatch.matches,
+    matches: mismatch.matches && exactMismatch.matches,
   };
 }
 
@@ -148,11 +164,14 @@ async function runCopyCleanerGeminiRealTest(options) {
     console.log(JSON.stringify(result, null, 2));
 
     if (!validationResult.matches) {
+      var failure = validationResult.exactMismatch && !validationResult.exactMismatch.matches
+        ? validationResult.exactMismatch
+        : validationResult.mismatch;
       throw new Error(
         'Clipboard text did not match expected cleaned output. ' +
-        'firstDiffIndex=' + validationResult.mismatch.firstDiffIndex +
-        ' expectedFragment=' + JSON.stringify(validationResult.mismatch.expectedFragment) +
-        ' actualFragment=' + JSON.stringify(validationResult.mismatch.actualFragment)
+        'firstDiffIndex=' + failure.firstDiffIndex +
+        ' expectedFragment=' + JSON.stringify(failure.expectedFragment) +
+        ' actualFragment=' + JSON.stringify(failure.actualFragment)
       );
     }
     return result;
