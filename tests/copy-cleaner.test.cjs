@@ -158,9 +158,16 @@ function createTextNode(text) {
 
 function linkChildren(parent, children) {
   parent.firstChild = children[0] || null;
+  let prevElement = null;
   for (let i = 0; i < children.length; i++) {
     children[i].parentElement = parent;
     children[i].nextSibling = children[i + 1] || null;
+    if (children[i].nodeType === 1) {
+      children[i].previousElementSibling = prevElement;
+      if (prevElement) prevElement.nextElementSibling = children[i];
+      children[i].nextElementSibling = null;
+      prevElement = children[i];
+    }
   }
 }
 
@@ -267,7 +274,7 @@ test('copy cleaner preserves fenced code blocks for wrapped pre/code structures'
 
   assert.equal(
     serializeStructuredFragment(fragment),
-    '```\nfor i in range(3):\n    print(i)\n```'
+    '```python\nfor i in range(3):\n    print(i)\n```'
   );
 });
 
@@ -291,5 +298,63 @@ test('copy cleaner uses rendered code layout when chatgpt code DOM stores line b
   assert.equal(
     serializeStructuredFragment(fragment),
     '```\ndef foo():\n    x = 1\n\n    if x:\n        print(x)\n```'
+  );
+});
+
+test('copy cleaner uses Feishu-friendly indentation for nested ordered lists', () => {
+  const { serializeStructuredFragment } = loadCopyCleanerExports();
+  const fragment = createFragment([
+    createElement('OL', [
+      createElement('LI', [
+        createElement('P', [createTextNode('第一点')]),
+      ]),
+      createElement('LI', [
+        createElement('P', [createTextNode('第二点')]),
+        createElement('OL', [
+          createElement('LI', [
+            createElement('P', [createTextNode('子点 2.1')]),
+          ]),
+          createElement('LI', [
+            createElement('P', [createTextNode('子点 2.2')]),
+          ]),
+        ]),
+      ]),
+      createElement('LI', [
+        createElement('P', [createTextNode('第三点')]),
+      ]),
+    ]),
+  ]);
+
+  assert.equal(
+    serializeStructuredFragment(fragment),
+    [
+      '1. 第一点',
+      '2. 第二点',
+      '    1. 子点 2.1',
+      '    2. 子点 2.2',
+      '3. 第三点',
+    ].join('\n')
+  );
+});
+
+test('copy cleaner extracts ChatGPT code blocks from rendered pre text with language header', () => {
+  const { serializeStructuredFragment } = loadCopyCleanerExports();
+  const code = createElement('CODE', [
+    createTextNode('def greet(name):    print(f"Hello, {name}!")greet("World")'),
+  ]);
+  code.innerText = '';
+  const pre = createElement('PRE', [code]);
+  pre.innerText = 'Python\n运行\ndef greet(name):\n    print(f"Hello, {name}!")\ngreet("World")';
+  const fragment = createFragment([pre]);
+
+  assert.equal(
+    serializeStructuredFragment(fragment),
+    [
+      '```python',
+      'def greet(name):',
+      '    print(f"Hello, {name}!")',
+      'greet("World")',
+      '```',
+    ].join('\n')
   );
 });

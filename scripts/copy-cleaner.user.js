@@ -162,6 +162,28 @@
     return '`' + String(text || '').replace(/\r\n?/g, '\n').replace(/\n+/g, ' ').replace(/`/g, '\\`').replace(/\|/g, '\\|') + '`';
   }
 
+  function getRenderedText(node) {
+    if (!node) return '';
+    if (typeof node.innerText === 'string' && node.innerText) {
+      return String(node.innerText).replace(/\r\n?/g, '\n');
+    }
+    return getPreformattedText(node);
+  }
+
+  function getAttributeValue(node, name) {
+    if (!node || !name) return '';
+    if (typeof node.getAttribute === 'function') {
+      return String(node.getAttribute(name) || '');
+    }
+    return typeof node[name] === 'string' ? node[name] : '';
+  }
+
+  function hasAttributeValue(node, name) {
+    if (!node || !name) return false;
+    if (typeof node.hasAttribute === 'function') return node.hasAttribute(name);
+    return !!node[name];
+  }
+
   function getPreformattedText(node) {
     if (!node) return '';
     if (node.nodeType === Node.TEXT_NODE) {
@@ -405,7 +427,27 @@
     }
 
     if (node.tagName === 'CODE') {
-      parts.push(formatInlineCode(node.textContent));
+      parts.push(formatInlineCode(getRenderedText(node) || node.textContent));
+      return;
+    }
+
+    if (node.tagName === 'A') {
+      var label = getInlineNodeText(node, options);
+      var href = getAttributeValue(node, 'href');
+      if (hasAttributeValue(node, 'data-footnote-ref')) {
+        var refText = String(label || '').replace(/[^\d]+/g, '') || '1';
+        parts.push('[^' + refText + ']');
+        return;
+      }
+      if (hasAttributeValue(node, 'data-footnote-backref')) {
+        parts.push('↩');
+        return;
+      }
+      if (href && label) {
+        parts.push('[' + label.replace(/]/g, '\\]') + '](' + href.replace(/\)/g, '\\)') + ')');
+        return;
+      }
+      appendInlineText(parts, label);
       return;
     }
 
@@ -435,11 +477,87 @@
     return new Array(longest + 2).join('`');
   }
 
+  function looksLikeCodeLine(line) {
+    var trimmed = String(line || '').trim();
+    if (!trimmed) return false;
+    return /^\s/.test(String(line || '')) ||
+      /[{}()[\];=]/.test(trimmed) ||
+      /:$/.test(trimmed) ||
+      /^(def |class |if |elif |else:|for |while |try:|except |return |const |let |var |function |import |from |print\(|console\.|<\w)/.test(trimmed);
+  }
+
+  function extractPreformattedCodeBlock(preNode, codeNode) {
+    var preRendered = getRenderedText(preNode).replace(/\r\n?/g, '\n');
+    var preLines = preRendered.split('\n').filter(function (line, index, lines) {
+      return line || index < lines.length - 1;
+    });
+    function detectLanguage(codeText) {
+      for (var languageIndex = 0; languageIndex < preLines.length; languageIndex++) {
+        var languageCandidate = preLines[languageIndex].trim();
+        if (!languageCandidate || /^(复制|运行)$/i.test(languageCandidate)) continue;
+        if (/^[A-Za-z0-9.+#_-]{1,30}$/.test(languageCandidate)) {
+          return languageCandidate.toLowerCase();
+        }
+      }
+      var compactPre = preRendered.replace(/\s+/g, '');
+      var compactCode = String(codeText || '').replace(/\s+/g, '');
+      if (compactPre && compactCode) {
+        var codePos = compactPre.indexOf(compactCode);
+        if (codePos > 0) {
+          var prefix = compactPre.slice(0, codePos).replace(/(复制|运行)+$/i, '');
+          if (/^[A-Za-z0-9.+#_-]{1,30}$/.test(prefix)) {
+            return prefix.toLowerCase();
+          }
+        }
+      }
+      return '';
+    }
+
+    var rawCodeText = getPreformattedText(codeNode || preNode).replace(/\n$/, '');
+    if (/\n/.test(rawCodeText)) {
+      return {
+        language: detectLanguage(rawCodeText),
+        codeText: rawCodeText,
+      };
+    }
+
+    var codeRendered = codeNode && typeof codeNode.innerText === 'string'
+      ? String(codeNode.innerText || '').replace(/\r\n?/g, '\n')
+      : '';
+    if (codeRendered) {
+      return {
+        language: detectLanguage(codeRendered),
+        codeText: codeRendered.replace(/\n$/, ''),
+      };
+    }
+
+    var codeStartIndex = -1;
+    for (var i = 0; i < preLines.length; i++) {
+      if (looksLikeCodeLine(preLines[i])) {
+        codeStartIndex = i;
+        break;
+      }
+    }
+
+    if (codeStartIndex === -1) {
+      return {
+        language: detectLanguage(rawCodeText),
+        codeText: getPreformattedText(codeNode || preNode).replace(/\n$/, ''),
+      };
+    }
+
+    return {
+      language: detectLanguage(preLines.slice(codeStartIndex).join('\n')),
+      codeText: preLines.slice(codeStartIndex).join('\n').replace(/\n$/, ''),
+    };
+  }
+
   function buildMarkdownTable(table) {
     var rowNodes = table.querySelectorAll('tr');
     if (!rowNodes.length) return '';
 
     var rows = [];
+    var columnAlignments = [];
     for (var i = 0; i < rowNodes.length; i++) {
       var cellNodes = rowNodes[i].children;
       var cells = [];
@@ -447,6 +565,10 @@
       for (var j = 0; j < cellNodes.length; j++) {
         if (cellNodes[j].tagName !== 'TH' && cellNodes[j].tagName !== 'TD') continue;
         if (cellNodes[j].tagName === 'TH') isHeader = true;
+        if (!columnAlignments[j]) {
+          var align = cellNodes[j].style && cellNodes[j].style.textAlign ? String(cellNodes[j].style.textAlign).toLowerCase() : '';
+          columnAlignments[j] = align;
+        }
         cells.push(normalizeTableCell(getInlineNodeText(cellNodes[j], { lineBreakToken: '<br>' })));
       }
       if (cells.length) rows.push({ cells: cells, isHeader: isHeader });
@@ -468,11 +590,19 @@
       return '| ' + padded.join(' | ') + ' |';
     }
 
+    function formatDivider(index) {
+      var align = columnAlignments[index] || '';
+      if (align === 'right') return '---:';
+      if (align === 'left') return ':---';
+      if (align === 'center') return ':---:';
+      return '---';
+    }
+
     var header = rows[0].isHeader ? rows[0].cells : new Array(columnCount).fill('');
     var bodyRows = rows[0].isHeader ? rows.slice(1) : rows;
     var lines = [
       formatRow(header),
-      formatRow(new Array(columnCount).fill('---')),
+      formatRow(new Array(columnCount).fill('').map(function (_, index) { return formatDivider(index); })),
     ];
 
     for (var n = 0; n < bodyRows.length; n++) {
@@ -550,14 +680,32 @@
       return;
     }
 
+    if (node.tagName === 'UL' || node.tagName === 'OL') {
+      state.listDepth = (state.listDepth || 0) + 1;
+      for (var listNode = node.firstChild; listNode; listNode = listNode.nextSibling) {
+        serializeStructuredNode(listNode, state);
+      }
+      state.listDepth = Math.max(0, (state.listDepth || 1) - 1);
+      return;
+    }
+
     if (node.tagName === 'LI') {
       appendStructuredLineBreak(state);
+      var indent = '';
+      if (state.listDepth > 1) {
+        var indentSize = node.parentElement && node.parentElement.tagName === 'OL' ? 4 : 2;
+        indent = new Array(((state.listDepth - 1) * indentSize) + 1).join(' ');
+      }
+      if (indent) state.value += indent;
       var itemIndex = 0;
       for (var sibling = node.previousElementSibling; sibling; sibling = sibling.previousElementSibling) {
         if (sibling.tagName === 'LI') itemIndex++;
       }
-      if (node.parentElement && node.parentElement.tagName === 'OL') {
-        var start = parseInt(node.parentElement.getAttribute('start') || '1', 10);
+      var taskCheckbox = node.querySelector ? node.querySelector('input[type="checkbox"], input') : null;
+      if (taskCheckbox && taskCheckbox.tagName === 'INPUT') {
+        appendStructuredText(state, '- [' + (taskCheckbox.checked ? 'x' : ' ') + '] ');
+      } else if (node.parentElement && node.parentElement.tagName === 'OL') {
+        var start = parseInt(getAttributeValue(node.parentElement, 'start') || '1', 10);
         appendStructuredText(state, (isNaN(start) ? 1 : start) + itemIndex + '. ');
       } else {
         appendStructuredText(state, '- ');
@@ -616,15 +764,30 @@
       return;
     }
 
+    if (node.tagName === 'SECTION' && node.querySelector && node.querySelector('ol > li[id^="user-content-fn-"]')) {
+      var footnoteItems = node.querySelectorAll('ol > li[id^="user-content-fn-"]');
+      var footnoteLines = [];
+      for (var footnoteIndex = 0; footnoteIndex < footnoteItems.length; footnoteIndex++) {
+        var footnoteItem = footnoteItems[footnoteIndex];
+        var footnoteId = getAttributeValue(footnoteItem, 'id').replace(/^user-content-fn-/, '') || String(footnoteIndex + 1);
+        var footnoteParagraph = footnoteItem.querySelector('p') || footnoteItem;
+        footnoteLines.push('[^' + footnoteId + ']: ' + getInlineNodeText(footnoteParagraph, { lineBreakToken: ' ' }).trim());
+      }
+      appendStructuredBlock(state, footnoteLines.join('\n'));
+      return;
+    }
+
     if (node.tagName === 'PRE') {
       var codeChild = node.querySelector ? node.querySelector('code') : null;
       if (codeChild) {
-        var codeText = getPreformattedText(codeChild).replace(/\n$/, '');
+        var codeBlock = extractPreformattedCodeBlock(node, codeChild);
+        var codeText = codeBlock.codeText;
+        var language = codeBlock.language;
         var fence = getCodeFence(codeText);
-        appendStructuredBlock(state, fence + '\n' + codeText + '\n' + fence);
+        appendStructuredBlock(state, fence + language + '\n' + codeText + '\n' + fence);
       } else {
         appendStructuredLineBreak(state);
-        state.value += getPreformattedText(node).replace(/\n$/, '');
+        state.value += getRenderedText(node).replace(/\n$/, '');
         appendStructuredLineBreak(state);
       }
       return;

@@ -60,10 +60,10 @@
 
 #### 自动测试
 
-启动好 `9222` 调试 Chrome 后，可直接执行：
+启动好 `9222` 调试 Chrome 后，直接执行真实场景测试：
 
 ```bash
-npm run copycleaner:chatgpt
+npm run copycleaner:realtest
 ```
 
 该命令会自动完成：
@@ -74,13 +74,28 @@ npm run copycleaner:chatgpt
 4. 发送固定提示词，并点击 ChatGPT 官方回复 copy 按钮
 5. 读取系统剪贴板，校验结果是否为 `AI公式在 $x^2$ 里`
 
+这条命令比 `npm test` 更接近真实效果，因为它验证的是：
+
+1. 本地 userscript 是否成功同步进 Tampermonkey
+2. ChatGPT 官方 copy 按钮是否真的走到了脚本拦截链路
+3. 系统剪贴板里的最终文本和标准答案是否完全一致
+
+查看当前内置真实 case：
+
+```bash
+node scripts/copy-cleaner-chatgpt-runner.js --list-cases
+```
+
 如果要自定义目标页面或断言文本，也可以直接运行：
 
 ```bash
 node scripts/copy-cleaner-chatgpt-runner.js \
+  --case chatgpt-basic-cleanup \
   --url https://chatgpt.com/ \
   --expected 'AI公式在 $x^2$ 里'
 ```
+
+如果断言失败，脚本会输出 `firstDiffIndex`、`expectedFragment`、`actualFragment`，方便直接看剪贴板结果和标准答案从哪里开始不一致。
 
 ***
 
@@ -152,5 +167,44 @@ agent-browser connect 9222
 
 ### 通用 Tampermonkey 同步
 
-- `scripts/tampermonkey-cdp-utils.cjs` 提供了基于 CDP 的通用同步能力，可被不同 userscript 的自动化验证复用。
-- 当前 `scripts/copy-cleaner-chatgpt-runner.js` 已经使用这套通用同步逻辑；后续其他脚本也应优先复用这里。
+- `scripts/tampermonkey-cdp-utils.cjs` 提供了基于 CDP 的通用同步能力。
+- 推荐直接使用 CLI：
+
+```bash
+npm run tampermonkey:sync -- --script-path scripts/copy-cleaner.user.js
+```
+
+- 查看帮助：
+
+```bash
+npm run tampermonkey:sync -- --help
+```
+
+`--help` 用法：
+
+```text
+Tampermonkey userscript sync CLI
+
+Usage:
+  node scripts/tampermonkey-sync-cli.cjs --script-path <path> [options]
+
+Options:
+  --script-path <path>    Local userscript file to import into Tampermonkey
+  --cdp-url <url>         CDP endpoint URL or port alias (default: http://127.0.0.1:9222)
+  --extension-id <id>     Tampermonkey extension id (default: dhdgffkkebhmkfjojejmpbldmpobfkfo)
+  --json                  Print machine-readable JSON only
+  --help                  Show this message
+```
+
+也可以在 Node 脚本里直接导入高阶函数：
+
+```js
+const { syncUserscriptToTampermonkey } = require('./index.js');
+
+await syncUserscriptToTampermonkey({
+  scriptPath: './scripts/copy-cleaner.user.js',
+  cdpUrl: 'http://127.0.0.1:9222',
+});
+```
+
+- 当前 `scripts/copy-cleaner-chatgpt-runner.js`、`scripts/feishu-real-test-runner.js` 等真实站点验证脚本已直接复用这套统一同步入口。

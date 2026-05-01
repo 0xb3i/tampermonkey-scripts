@@ -302,6 +302,32 @@ async function syncTampermonkeyScript(page, options) {
   };
 }
 
+async function syncUserscriptInBrowser(browser, options) {
+  var page = options && options.page ? options.page : await getPrimaryPage(browser);
+  var previousUrl = page.url();
+  var sync = await syncTampermonkeyScript(page, options);
+  return {
+    page: page,
+    previousUrl: previousUrl,
+    sync: sync,
+  };
+}
+
+async function syncUserscriptToTampermonkey(options) {
+  var endpointUrl = options && options.cdpUrl ? String(options.cdpUrl) : DEFAULT_CDP_ENDPOINT;
+  var browser = await connectToChromeOverCDP(endpointUrl);
+  try {
+    var result = await syncUserscriptInBrowser(browser, options);
+    return {
+      cdpUrl: endpointUrl,
+      previousUrl: result.previousUrl,
+      sync: result.sync,
+    };
+  } finally {
+    await browser.close();
+  }
+}
+
 module.exports = {
   DEFAULT_CDP_ENDPOINT,
   DEFAULT_TAMPERMONKEY_EXTENSION_ID,
@@ -313,5 +339,7 @@ module.exports = {
   openTampermonkeyPage,
   readScriptRow,
   syncTampermonkeyScript,
+  syncUserscriptInBrowser,
+  syncUserscriptToTampermonkey,
   waitForElement,
 };
