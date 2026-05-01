@@ -100,6 +100,77 @@ test('copy cleaner selection payload only intercepts when text actually changes'
   );
 });
 
+test('copy cleaner selection payload uses structured serialization for rich paragraph links', () => {
+  const { buildClipboardPayloadFromSelection } = loadCopyCleanerExports();
+  const paragraph = createElement('P', [
+    createTextNode('链接：'),
+    createLink('https://example.com', '示例'),
+  ]);
+  const fragment = createFragment([paragraph]);
+  const payload = buildClipboardPayloadFromSelection({
+    isCollapsed: false,
+    rangeCount: 1,
+    toString: function () { return '链接：示例'; },
+    getRangeAt: function () {
+      return {
+        startContainer: createTextNode('链接：'),
+        endContainer: createTextNode('示例'),
+        cloneRange: function () { return this; },
+        cloneContents: function () { return fragment; },
+      };
+    },
+  });
+
+  assert.ok(payload);
+  assert.equal(payload.text, '链接：[示例](https://example.com)');
+});
+
+test('copy cleaner selection payload preserves nested ordered lists for structured selections', () => {
+  const { buildClipboardPayloadFromSelection } = loadCopyCleanerExports();
+  const fragment = createFragment([
+    createElement('OL', [
+      createElement('LI', [
+        createElement('P', [createTextNode('第一点')]),
+      ]),
+      createElement('LI', [
+        createElement('P', [createTextNode('第二点')]),
+        createElement('OL', [
+          createElement('LI', [
+            createElement('P', [createTextNode('子点 2.1')]),
+          ]),
+          createElement('LI', [
+            createElement('P', [createTextNode('子点 2.2')]),
+          ]),
+        ]),
+      ]),
+    ]),
+  ]);
+  const payload = buildClipboardPayloadFromSelection({
+    isCollapsed: false,
+    rangeCount: 1,
+    toString: function () { return '第一点第二点子点 2.1子点 2.2'; },
+    getRangeAt: function () {
+      return {
+        startContainer: createTextNode('第一点'),
+        endContainer: createTextNode('子点 2.2'),
+        cloneRange: function () { return this; },
+        cloneContents: function () { return fragment; },
+      };
+    },
+  });
+
+  assert.ok(payload);
+  assert.equal(
+    payload.text,
+    [
+      '1. 第一点',
+      '2. 第二点',
+      '    1. 子点 2.1',
+      '    2. 子点 2.2',
+    ].join('\n')
+  );
+});
+
 test('copy cleaner keeps indentation for plain code copied through clipboard text path', () => {
   const { normalizeClipboardText } = loadCopyCleanerExports();
   const code = 'def foo():\n    x = 1\n\n    if x:\n        print(x)';
@@ -207,7 +278,7 @@ function createElement(tagName, children) {
       selector = String(selector || '').toUpperCase();
       function visit(node) {
         if (!node || node.nodeType !== 1) return null;
-        if (node.tagName === selector) return node;
+    if (selector === '*' || node.tagName === selector) return node;
         for (let child = node.firstChild; child; child = child.nextSibling) {
           const found = visit(child);
           if (found) return found;
@@ -235,6 +306,20 @@ function createElement(tagName, children) {
   return element;
 }
 
+function setAttributes(element, attrs) {
+  attrs = attrs || {};
+  element.getAttribute = function (name) {
+    return Object.prototype.hasOwnProperty.call(attrs, name) ? attrs[name] : '';
+  };
+  element.hasAttribute = function (name) {
+    return Object.prototype.hasOwnProperty.call(attrs, name);
+  };
+  if (Object.prototype.hasOwnProperty.call(attrs, 'class')) {
+    element.className = attrs.class;
+  }
+  return element;
+}
+
 function createLink(href, text) {
   const link = createElement('A', [createTextNode(text)]);
   link.getAttribute = function (name) {
@@ -256,7 +341,7 @@ function createFragment(children) {
       }).filter(Boolean);
       function visit(node) {
         if (!node || node.nodeType !== 1) return null;
-        if (selectors.includes(node.tagName)) return node;
+        if (selectors.includes('*') || selectors.includes(node.tagName)) return node;
         for (let child = node.firstChild; child; child = child.nextSibling) {
           const found = visit(child);
           if (found) return found;
@@ -321,6 +406,53 @@ test('copy cleaner preserves markdown links when structured fragments are serial
   assert.equal(
     extractFragmentText(fragment, '链接：百度'),
     '- 链接：[百度](https://www.baidu.com)'
+  );
+});
+
+test('copy cleaner skips code block headers outside pre when container already exposes data-testid code_block', () => {
+  const { serializeStructuredFragment } = loadCopyCleanerExports();
+  const code = setAttributes(createElement('CODE', [
+    createTextNode('def hello():\n    print("Hello, Markdown!")\n\nhello()\n'),
+  ]), { class: 'language-python' });
+  const pre = setAttributes(createElement('PRE', [code]), { class: 'language-python' });
+  const header = createElement('DIV', [createTextNode('python')]);
+  const container = setAttributes(createElement('DIV', [header, pre]), { 'data-testid': 'code_block' });
+  const fragment = createFragment([container]);
+
+  assert.equal(
+    serializeStructuredFragment(fragment),
+    [
+      '```python',
+      'def hello():',
+      '    print("Hello, Markdown!")',
+      '',
+      'hello()',
+      '```',
+    ].join('\n')
+  );
+});
+
+test('copy cleaner skips empty svg placeholder images in structured serialization', () => {
+  const { extractFragmentText } = loadCopyCleanerExports();
+  const placeholder = setAttributes(createElement('IMG'), {
+    src: 'data:image/svg+xml,%3csvg%20xmlns=%27http://www.w3.org/2000/svg%27/%3e',
+    alt: '',
+  });
+  const realImage = setAttributes(createElement('IMG'), {
+    src: 'https://example.com/image.png',
+    alt: 'image',
+  });
+  const fragment = createFragment([
+    createElement('P', [
+      createTextNode('图片：'),
+      placeholder,
+      realImage,
+    ]),
+  ]);
+
+  assert.equal(
+    extractFragmentText(fragment, '图片：'),
+    '图片：![image](https://example.com/image.png)'
   );
 });
 
@@ -400,6 +532,42 @@ test('copy cleaner uses Feishu-friendly indentation for nested ordered lists', (
       '    1. 子点 2.1',
       '    2. 子点 2.2',
       '3. 第三点',
+    ].join('\n')
+  );
+});
+
+test('copy cleaner uses four spaces for unordered sublists nested under ordered items', () => {
+  const { serializeStructuredFragment } = loadCopyCleanerExports();
+  const fragment = createFragment([
+    createElement('OL', [
+      createElement('LI', [
+        createElement('P', [createTextNode('打开文档')]),
+      ]),
+      createElement('LI', [
+        createElement('P', [createTextNode('输入以下内容：')]),
+        createElement('UL', [
+          createElement('LI', [
+            createElement('P', [createTextNode('使用 粗体 强调重点')]),
+          ]),
+          createElement('LI', [
+            createElement('P', [createTextNode('使用 斜体 表示术语')]),
+          ]),
+          createElement('LI', [
+            createElement('P', [createTextNode('使用 `代码` 表示命令')]),
+          ]),
+        ]),
+      ]),
+    ]),
+  ]);
+
+  assert.equal(
+    serializeStructuredFragment(fragment),
+    [
+      '1. 打开文档',
+      '2. 输入以下内容：',
+      '    - 使用 粗体 强调重点',
+      '    - 使用 斜体 表示术语',
+      '    - 使用 `代码` 表示命令',
     ].join('\n')
   );
 });

@@ -55,6 +55,7 @@ const CHATGPT_REAL_TEST_CASES = {
       '| Alice | 25 | 北京 |',
       '| Bob | 30 | 上海 |',
       '| Charlie | 28 | 广州 |',
+      '',
       '---',
       '链接与图片：',
       '- 链接：[百度](https://www.baidu.com)',

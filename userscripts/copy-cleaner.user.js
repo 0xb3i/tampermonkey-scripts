@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         复制净化器
 // @namespace    https://github.com/tampermonkey-scripts
-// @version      5.0.7
+// @version      5.0.10
 // @description  复制时自动去除加粗/括号/引号，并将数学公式提取为 LaTeX $$ 格式，兼容网站自带复制按钮
 // @author       beibei
 // @match        *://*/*
@@ -189,6 +189,13 @@
   function formatImageMarkdown(alt, src) {
     if (!src) return '';
     return '![' + String(alt || '').replace(/]/g, '\\]') + '](' + String(src).replace(/\)/g, '\\)') + ')';
+  }
+
+  function shouldSkipImageNode(node) {
+    var src = getAttributeValue(node, 'src');
+    var alt = getAttributeValue(node, 'alt');
+    if (!src) return true;
+    return /^data:image\/svg\+xml/i.test(src) && !alt;
   }
 
   function getRenderedText(node) {
@@ -464,6 +471,7 @@
     }
 
     if (node.tagName === 'IMG') {
+      if (shouldSkipImageNode(node)) return;
       parts.push(formatImageMarkdown(getAttributeValue(node, 'alt'), getAttributeValue(node, 'src')));
       return;
     }
@@ -516,6 +524,7 @@
       return formatInlineCode(getRenderedText(node) || node.textContent);
     }
     if (node.nodeType === Node.ELEMENT_NODE && node.tagName === 'IMG') {
+      if (shouldSkipImageNode(node)) return '';
       return formatImageMarkdown(getAttributeValue(node, 'alt'), getAttributeValue(node, 'src'));
     }
     if (node.nodeType === Node.ELEMENT_NODE && node.tagName === 'A') {
@@ -558,9 +567,19 @@
       return line || index < lines.length - 1;
     });
     var languageLabel = preNode && preNode.querySelector ? getRenderedText(preNode.querySelector('.code-block-language-label')).trim().toLowerCase() : '';
+    var classLanguage = '';
+    function readClassLanguage(value) {
+      var match = String(value || '').match(/(?:^|\s)language-([A-Za-z0-9.+#_-]{1,30})(?:\s|$)/);
+      return match ? match[1].toLowerCase() : '';
+    }
+    classLanguage = readClassLanguage(preNode && preNode.className);
+    if (!classLanguage) classLanguage = readClassLanguage(codeNode && codeNode.className);
     function detectLanguage(codeText) {
       if (/^[a-z0-9.+#_-]{1,30}$/.test(languageLabel)) {
         return languageLabel;
+      }
+      if (/^[a-z0-9.+#_-]{1,30}$/.test(classLanguage)) {
+        return classLanguage;
       }
       for (var languageIndex = 0; languageIndex < preLines.length; languageIndex++) {
         var languageCandidate = preLines[languageIndex].trim();
@@ -801,8 +820,7 @@
       appendStructuredLineBreak(state);
       var indent = '';
       if (state.listDepth > 1) {
-        var indentSize = node.parentElement && node.parentElement.tagName === 'OL' ? 4 : 2;
-        indent = new Array(((state.listDepth - 1) * indentSize) + 1).join(' ');
+        indent = new Array(getNestedListIndent(node) + 1).join(' ');
       }
       if (indent) state.value += indent;
       var itemIndex = 0;
@@ -887,6 +905,14 @@
         appendStructuredLineBreak(state);
       }
       return;
+    }
+
+    if (getAttributeValue(node, 'data-testid') === 'code_block' && node.querySelector) {
+      var nestedPre = node.querySelector('pre');
+      if (nestedPre) {
+        serializeStructuredNode(nestedPre, state);
+        return;
+      }
     }
 
     if (node.tagName === 'P') {
@@ -1043,8 +1069,40 @@
     return copyTextWithMarker(text, markerName);
   }
 
+  // #region debug-point A:reporter
+  function reportSelectionCopyDebug(hypothesisId, location, msg, data) {
+    if (typeof fetch !== 'function') return;
+    fetch('http://127.0.0.1:7777/event', {
+      method: 'POST',
+      body: JSON.stringify({
+        sessionId: 'selection-copy-regression',
+        runId: 'post-fix',
+        hypothesisId: hypothesisId,
+        location: location,
+        msg: '[DEBUG] ' + msg,
+        data: data || {},
+        ts: Date.now(),
+      }),
+    }).catch(function () {});
+  }
+  // #endregion
+
   function hasStructuredFragmentContent(fragment) {
-    return !!(fragment && fragment.querySelector && fragment.querySelector('ul li, ol li, h1, h2, h3, h4, h5, h6, blockquote, pre, code, hr, table'));
+    return !!(fragment && fragment.querySelector && fragment.querySelector('*'));
+  }
+
+  function getNestedListIndent(node) {
+    var indent = 0;
+    var currentList = node && node.parentElement;
+    while (currentList && (currentList.tagName === 'UL' || currentList.tagName === 'OL')) {
+      var parentItem = currentList.parentElement;
+      if (!parentItem || parentItem.tagName !== 'LI') break;
+      var containerList = parentItem.parentElement;
+      if (!containerList || (containerList.tagName !== 'UL' && containerList.tagName !== 'OL')) break;
+      indent += containerList.tagName === 'OL' ? 4 : 2;
+      currentList = containerList;
+    }
+    return indent;
   }
 
   function extractFragmentText(fragment, baseText) {
@@ -1059,6 +1117,13 @@
     if (!selection || selection.isCollapsed) return null;
 
     var rawText = selection.toString();
+    // #region debug-point A:selection-entry
+    reportSelectionCopyDebug('A', 'copy-cleaner.user.js:1061', 'selection payload entry', {
+      rawTextLength: rawText ? rawText.length : 0,
+      rangeCount: selection.rangeCount || 0,
+      isCollapsed: !!selection.isCollapsed,
+    });
+    // #endregion
     if (selection.rangeCount) {
       var range = selection.getRangeAt(0).cloneRange();
       var startElement = range.startContainer instanceof Element ? range.startContainer : range.startContainer.parentElement;
@@ -1074,19 +1139,44 @@
         fragment.querySelector('[data-latex]') ||
         fragment.querySelector('[data-latex-display]');
       var hasStructured = hasStructuredFragmentContent(fragment);
+      // #region debug-point B:fragment-shape
+      reportSelectionCopyDebug('B', 'copy-cleaner.user.js:1076', 'selection fragment shape', {
+        hasMath: !!hasMath,
+        hasStructured: !!hasStructured,
+        fragmentTextLength: fragment && typeof fragment.textContent === 'string' ? fragment.textContent.length : 0,
+      });
+      // #endregion
       if (hasMath) {
         extractLatexFromFragment(fragment);
         var mathText = extractFragmentText(fragment, fragment.textContent);
+        // #region debug-point C:math-branch
+        reportSelectionCopyDebug('C', 'copy-cleaner.user.js:1080', 'selection math branch', {
+          structured: !!hasStructured,
+          resultPreview: String(hasStructured ? mathText : cleanText(mathText)).slice(0, 200),
+        });
+        // #endregion
         return { text: hasStructured ? mathText : cleanText(mathText) };
       }
       if (hasStructured) {
         var structuredText = extractFragmentText(fragment, rawText);
+        // #region debug-point D:structured-branch
+        reportSelectionCopyDebug('D', 'copy-cleaner.user.js:1086', 'selection structured branch', {
+          changed: structuredText !== rawText,
+          resultPreview: String(structuredText || '').slice(0, 200),
+        });
+        // #endregion
         return structuredText !== rawText ? { text: structuredText } : null;
       }
     }
 
     if (!rawText) return null;
     var cleanedText = cleanText(rawText);
+    // #region debug-point E:plain-branch
+    reportSelectionCopyDebug('E', 'copy-cleaner.user.js:1090', 'selection plain branch', {
+      changed: cleanedText !== rawText,
+      resultPreview: String(cleanedText || '').slice(0, 200),
+    });
+    // #endregion
     return cleanedText !== rawText
       ? { text: cleanedText }
       : null;
@@ -1162,6 +1252,13 @@
 
   function onCopy(e) {
     var payload = buildClipboardPayloadFromSelection(window.getSelection());
+    // #region debug-point F:on-copy
+    reportSelectionCopyDebug('F', 'copy-cleaner.user.js:1165', 'onCopy observed', {
+      intercepted: !!(payload && e.clipboardData),
+      hasClipboardData: !!(e && e.clipboardData),
+      payloadPreview: payload && payload.text ? String(payload.text).slice(0, 200) : '',
+    });
+    // #endregion
     if (!payload || !e.clipboardData) return;
 
     e.preventDefault();
@@ -1174,6 +1271,13 @@
     if (!isCopy) return;
 
     var payload = buildClipboardPayloadFromSelection(window.getSelection());
+    // #region debug-point G:on-keydown
+    reportSelectionCopyDebug('G', 'copy-cleaner.user.js:1178', 'onKeydown observed', {
+      intercepted: payload !== null,
+      hasClipboardWriteText: !!(navigator.clipboard && navigator.clipboard.writeText),
+      payloadPreview: payload && payload.text ? String(payload.text).slice(0, 200) : '',
+    });
+    // #endregion
     if (payload === null) return;
 
     e.preventDefault();
