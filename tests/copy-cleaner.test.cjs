@@ -9,7 +9,7 @@ function loadCopyCleanerExports() {
   const source = fs.readFileSync(filePath, 'utf8');
   const instrumented = source.replace(
     /\}\)\(\);\s*$/,
-    "window.__copyCleanerTestExports = { cleanText: cleanText, splitByLatex: splitByLatex, normalizeClipboardText: normalizeClipboardText, buildClipboardPayloadFromSelection: buildClipboardPayloadFromSelection, serializeStructuredFragment: serializeStructuredFragment, extractFragmentText: extractFragmentText };})();"
+    "window.__copyCleanerTestExports = { cleanText: cleanText, splitByLatex: splitByLatex, normalizeClipboardText: normalizeClipboardText, normalizeStructuredMarkdownForPaste: normalizeStructuredMarkdownForPaste, buildClipboardPayloadFromSelection: buildClipboardPayloadFromSelection, serializeStructuredFragment: serializeStructuredFragment, extractFragmentText: extractFragmentText };})();"
   );
 
   if (instrumented === source) {
@@ -135,6 +135,25 @@ test('copy cleaner preserves fenced code blocks when normalizing markdown clipbo
   );
 });
 
+test('copy cleaner inserts a blank line after markdown tables for Feishu rendering', () => {
+  const { normalizeStructuredMarkdownForPaste } = loadCopyCleanerExports();
+  assert.equal(
+    normalizeStructuredMarkdownForPaste([
+      '| 姓名 | 角色 | 状态 |',
+      '| --- | --- | --- |',
+      '| 张三 | 开发 | 已完成 |',
+      '下面是一段包含图片语法的文本：',
+    ].join('\n')),
+    [
+      '| 姓名 | 角色 | 状态 |',
+      '| --- | --- | --- |',
+      '| 张三 | 开发 | 已完成 |',
+      '',
+      '下面是一段包含图片语法的文本：',
+    ].join('\n')
+  );
+});
+
 test('copy cleaner removes old debug globals but keeps dual copy entry points', () => {
   const source = fs.readFileSync(path.join(__dirname, '../userscripts/copy-cleaner.user.js'), 'utf8');
 
@@ -144,6 +163,9 @@ test('copy cleaner removes old debug globals but keeps dual copy entry points', 
   assert.doesNotMatch(source, /__tampermonkeyScriptDebugExports/);
   assert.match(source, /window\.addEventListener\('copy', onCopy, true\)/);
   assert.match(source, /window\.addEventListener\('keydown', onKeydown, true\)/);
+  assert.match(source, /window\.addEventListener\('click', onChatGptCopyButtonClick, true\)/);
+  assert.match(source, /window\.addEventListener\('click', onTikaCopyButtonClick, true\)/);
+  assert.match(source, /data-copy-cleaner-tika-copy/);
 });
 
 function createTextNode(text) {

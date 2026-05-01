@@ -8,6 +8,7 @@
     "copycleaner:chatgpt": "node automation/copy-cleaner-chatgpt-runner.js",
     "copycleaner:realtest": "node automation/copy-cleaner-chatgpt-runner.js --case chatgpt-markdown-fixture-page",
     "copycleaner:prompttest": "node automation/copy-cleaner-chatgpt-runner.js --case chatgpt-basic-cleanup",
+    "copycleaner:tika": "node automation/copy-cleaner-tika-runner.js",
     "feishu:realtest": "node automation/feishu-real-test-runner.js",
     "tampermonkey:sync": "node bin/tampermonkey-sync-cli.cjs"
   },

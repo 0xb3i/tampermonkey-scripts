@@ -74,6 +74,12 @@
 npm run copycleaner:realtest
 ```
 
+或执行当前内置的 Tika 固定会话页回归：
+
+```bash
+npm run copycleaner:tika
+```
+
 该命令会自动完成：
 
 1. 连接 `http://127.0.0.1:9222`
@@ -94,6 +100,10 @@ npm run copycleaner:realtest
 node automation/copy-cleaner-chatgpt-runner.js --list-cases
 ```
 
+```bash
+node automation/copy-cleaner-tika-runner.js --list-cases
+```
+
 如果要自定义目标页面或断言文本，也可以直接运行：
 
 ```bash
@@ -104,6 +114,14 @@ node automation/copy-cleaner-chatgpt-runner.js \
 ```
 
 如果断言失败，脚本会输出 `firstDiffIndex`、`expectedFragment`、`actualFragment`，方便直接看剪贴板结果和标准答案从哪里开始不一致。
+
+新增站点时，推荐直接复用现有模式：
+
+1. 固定一个带代表性回复的真实会话页
+2. 先手工整理 oracle，明确“目标复制结果”而不是照抄当前脚本输出
+3. 新增 `automation/*-cases.cjs` 和 `automation/*-runner.js`
+4. 通过官方复制按钮触发 userscript 拦截，再比对系统剪贴板与 oracle
+5. 根据 diff 持续收敛站点专用适配和通用文本序列化逻辑
 
 ***
 

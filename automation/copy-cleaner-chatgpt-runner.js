@@ -10,6 +10,13 @@ const {
   syncUserscriptInBrowser,
 } = require('../lib/tampermonkey-cdp-utils.cjs');
 const {
+  buildTextMismatchSummary,
+  ensureClipboardPermission,
+  normalizeText,
+  parseCliArgs,
+  readClipboardText,
+} = require('./copy-cleaner-runner-utils.cjs');
+const {
   DEFAULT_CHATGPT_CASE_ID,
   getChatGPTRealTestCase,
   listChatGPTRealTestCases,
@@ -17,63 +24,6 @@ const {
 
 const DEFAULT_SCRIPT_PATH = resolve(__dirname, '../userscripts/copy-cleaner.user.js');
 const DEFAULT_URL = 'https://chatgpt.com/';
-
-function parseCliArgs(argv) {
-  var result = {};
-  for (var i = 0; i < argv.length; i++) {
-    var token = String(argv[i] || '');
-    if (!token.startsWith('--')) continue;
-    var key = token.slice(2);
-    var next = argv[i + 1];
-    if (!next || String(next).startsWith('--')) {
-      result[key] = true;
-      continue;
-    }
-    result[key] = next;
-    i += 1;
-  }
-  return result;
-}
-
-function normalizeText(text, ignoreLinePatterns) {
-  var patterns = Array.isArray(ignoreLinePatterns) ? ignoreLinePatterns : [];
-  var lines = String(text || '').replace(/\r\n?/g, '\n').split('\n');
-  if (patterns.length) {
-    lines = lines.filter(function (line) {
-      for (var i = 0; i < patterns.length; i++) {
-        if (patterns[i] && patterns[i].test && patterns[i].test(line)) return false;
-      }
-      return true;
-    });
-  }
-  return lines.join('\n').trim();
-}
-
-function buildTextMismatchSummary(expectedText, actualText, ignoreLinePatterns) {
-  var expected = normalizeText(expectedText, ignoreLinePatterns);
-  var actual = normalizeText(actualText, ignoreLinePatterns);
-  if (expected === actual) {
-    return {
-      matches: true,
-      firstDiffIndex: -1,
-      expectedFragment: '',
-      actualFragment: '',
-    };
-  }
-  var index = 0;
-  var max = Math.max(expected.length, actual.length);
-  while (index < max && expected.charAt(index) === actual.charAt(index)) {
-    index += 1;
-  }
-  var start = Math.max(0, index - 12);
-  var end = index + 24;
-  return {
-    matches: false,
-    firstDiffIndex: index,
-    expectedFragment: expected.slice(start, end),
-    actualFragment: actual.slice(start, end),
-  };
-}
 
 async function waitForExistingAssistantCopyButton(page) {
   await page.waitForFunction(function () {
@@ -100,11 +50,6 @@ async function waitForExistingAssistantReplyReady(page) {
     });
   }, null, { timeout: 5000 }).catch(function () {});
   await page.waitForTimeout(300);
-}
-
-async function ensureClipboardPermission(context, origin) {
-  if (!origin) return;
-  await context.grantPermissions(['clipboard-read', 'clipboard-write'], { origin: origin });
 }
 
 async function waitForChatInput(page) {
@@ -180,12 +125,6 @@ async function clickLatestCopyButton(page) {
   }
   await buttons.nth(target.index).click({ force: true });
   return target;
-}
-
-async function readClipboardText(page) {
-  return page.evaluate(async function () {
-    return navigator.clipboard.readText();
-  });
 }
 
 async function validateChatGPTCopyButton(page, options) {

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         复制净化器
 // @namespace    https://github.com/tampermonkey-scripts
-// @version      5.0.6
+// @version      5.0.7
 // @description  复制时自动去除加粗/括号/引号，并将数学公式提取为 LaTeX $$ 格式，兼容网站自带复制按钮
 // @author       beibei
 // @match        *://*/*
@@ -135,9 +135,33 @@
   function normalizeClipboardText(text) {
     if (looksLikePlainCodeCopy(text)) return String(text || '').replace(/\r\n?/g, '\n');
     var cleaned = cleanTextOutsideCodeFences(text);
+    cleaned = normalizeStructuredMarkdownForPaste(cleaned);
     return looksLikeMarkdownCopy(cleaned)
       ? compactMarkdownBlankLines(cleaned)
       : cleaned;
+  }
+
+  function normalizeStructuredMarkdownForPaste(text) {
+    var lines = String(text || '').replace(/\r\n?/g, '\n').split('\n');
+    var result = [];
+    function isTableLine(line) {
+      return /^\|.*\|$/.test(String(line || '').trim());
+    }
+    function isDividerLine(line) {
+      var trimmed = String(line || '').trim();
+      return /^\|(?:\s*:?-{3,}:?\s*\|)+$/.test(trimmed);
+    }
+    for (var i = 0; i < lines.length; i++) {
+      var line = lines[i];
+      result.push(line);
+      var prev = i > 0 ? lines[i - 1] : '';
+      var next = i + 1 < lines.length ? lines[i + 1] : '';
+      if (isTableLine(prev) && isDividerLine(line)) continue;
+      if (isTableLine(line) && !isTableLine(next) && next) {
+        result.push('');
+      }
+    }
+    return result.join('\n');
   }
 
   function getLatexDataAttr(isDisplay) {
@@ -160,6 +184,11 @@
 
   function formatInlineCode(text) {
     return '`' + String(text || '').replace(/\r\n?/g, '\n').replace(/\n+/g, ' ').replace(/`/g, '\\`').replace(/\|/g, '\\|') + '`';
+  }
+
+  function formatImageMarkdown(alt, src) {
+    if (!src) return '';
+    return '![' + String(alt || '').replace(/]/g, '\\]') + '](' + String(src).replace(/\)/g, '\\)') + ')';
   }
 
   function getRenderedText(node) {
@@ -190,6 +219,9 @@
       return String(node.nodeValue || '').replace(/\u00a0/g, ' ');
     }
     if (node.nodeType !== Node.ELEMENT_NODE && node.nodeType !== Node.DOCUMENT_FRAGMENT_NODE) {
+      return '';
+    }
+    if (node.nodeType === Node.ELEMENT_NODE && /^(SCRIPT|STYLE)$/.test(node.tagName)) {
       return '';
     }
     if (node.nodeType === Node.ELEMENT_NODE && node.tagName === 'BR') {
@@ -431,6 +463,11 @@
       return;
     }
 
+    if (node.tagName === 'IMG') {
+      parts.push(formatImageMarkdown(getAttributeValue(node, 'alt'), getAttributeValue(node, 'src')));
+      return;
+    }
+
     if (node.tagName === 'A') {
       var label = getInlineNodeText(node, options);
       var href = getAttributeValue(node, 'href');
@@ -464,6 +501,35 @@
     return parts.join('').replace(/[ \t]+$/g, '').replace(/^[ \t]+/g, '');
   }
 
+  function getLiteralInlineText(node) {
+    if (!node) return '';
+    if (node.nodeType === Node.TEXT_NODE) {
+      return String(node.nodeValue || '').replace(/\u00a0/g, ' ');
+    }
+    if (node.nodeType !== Node.ELEMENT_NODE && node.nodeType !== Node.DOCUMENT_FRAGMENT_NODE) {
+      return '';
+    }
+    if (node.nodeType === Node.ELEMENT_NODE && node.tagName === 'BR') {
+      return '\n';
+    }
+    if (node.nodeType === Node.ELEMENT_NODE && node.tagName === 'CODE') {
+      return formatInlineCode(getRenderedText(node) || node.textContent);
+    }
+    if (node.nodeType === Node.ELEMENT_NODE && node.tagName === 'IMG') {
+      return formatImageMarkdown(getAttributeValue(node, 'alt'), getAttributeValue(node, 'src'));
+    }
+    if (node.nodeType === Node.ELEMENT_NODE && node.tagName === 'A') {
+      var label = getInlineNodeText(node, { lineBreakToken: ' ' });
+      var href = getAttributeValue(node, 'href');
+      return href && label ? '[' + label.replace(/]/g, '\\]') + '](' + href.replace(/\)/g, '\\)') + ')' : label;
+    }
+    var text = '';
+    for (var child = node.firstChild; child; child = child.nextSibling) {
+      text += getLiteralInlineText(child);
+    }
+    return text;
+  }
+
   function normalizeTableCell(text) {
     return text.replace(/(^|[^\\])\|/g, '$1\\|');
   }
@@ -491,7 +557,11 @@
     var preLines = preRendered.split('\n').filter(function (line, index, lines) {
       return line || index < lines.length - 1;
     });
+    var languageLabel = preNode && preNode.querySelector ? getRenderedText(preNode.querySelector('.code-block-language-label')).trim().toLowerCase() : '';
     function detectLanguage(codeText) {
+      if (/^[a-z0-9.+#_-]{1,30}$/.test(languageLabel)) {
+        return languageLabel;
+      }
       for (var languageIndex = 0; languageIndex < preLines.length; languageIndex++) {
         var languageCandidate = preLines[languageIndex].trim();
         if (!languageCandidate || /^(复制|运行)$/i.test(languageCandidate)) continue;
@@ -647,6 +717,34 @@
     appendStructuredLineBreak(state);
   }
 
+  function collectListItemContent(node, inlineParts, nestedBlocks) {
+    if (!node) return;
+    if (node.nodeType === Node.TEXT_NODE) {
+      appendInlineText(inlineParts, node.nodeValue);
+      return;
+    }
+    if (node.nodeType !== Node.ELEMENT_NODE) return;
+    if (/^(UL|OL)$/.test(node.tagName)) {
+      nestedBlocks.push(node);
+      return;
+    }
+    if (node.tagName === 'P') {
+      appendInlineText(inlineParts, getInlineNodeText(node, { lineBreakToken: ' ' }));
+      return;
+    }
+    if (isBlockElement(node)) {
+      nestedBlocks.push(node);
+      return;
+    }
+    if (node.tagName === 'BR' || node.tagName === 'CODE' || node.tagName === 'A' || node.tagName === 'IMG') {
+      serializeInlineNode(node, inlineParts, { lineBreakToken: ' ' });
+      return;
+    }
+    for (var child = node.firstChild; child; child = child.nextSibling) {
+      collectListItemContent(child, inlineParts, nestedBlocks);
+    }
+  }
+
   function serializeStructuredNode(node, state) {
     if (!node) return;
 
@@ -677,6 +775,11 @@
         return;
       }
       appendStructuredLiteralText(state, formatInlineCode(getRenderedText(node) || node.textContent));
+      return;
+    }
+
+    if (node.tagName === 'A' || node.tagName === 'IMG') {
+      appendStructuredLiteralText(state, getLiteralInlineText(node));
       return;
     }
 
@@ -718,19 +821,7 @@
       var inlineParts = [];
       var nestedBlocks = [];
       for (var listChild = node.firstChild; listChild; listChild = listChild.nextSibling) {
-        if (listChild.nodeType === Node.ELEMENT_NODE && /^(UL|OL)$/.test(listChild.tagName)) {
-          nestedBlocks.push(listChild);
-          continue;
-        }
-        if (listChild.nodeType === Node.ELEMENT_NODE && listChild.tagName === 'P') {
-          appendInlineText(inlineParts, getInlineNodeText(listChild, { lineBreakToken: ' ' }));
-          continue;
-        }
-        if (listChild.nodeType === Node.ELEMENT_NODE && isBlockElement(listChild)) {
-          nestedBlocks.push(listChild);
-          continue;
-        }
-        serializeInlineNode(listChild, inlineParts, { lineBreakToken: ' ' });
+        collectListItemContent(listChild, inlineParts, nestedBlocks);
       }
       if (inlineParts.length) appendStructuredText(state, inlineParts.join('').trim());
       for (var nestedIndex = 0; nestedIndex < nestedBlocks.length; nestedIndex++) {
@@ -796,6 +887,14 @@
         appendStructuredLineBreak(state);
       }
       return;
+    }
+
+    if (node.tagName === 'P') {
+      var renderedParagraph = getLiteralInlineText(node).replace(/\r\n?/g, '\n').trim();
+      if (/^>\s?/m.test(renderedParagraph)) {
+        appendStructuredBlock(state, renderedParagraph);
+        return;
+      }
     }
 
     var isBlock = isBlockElement(node);
@@ -891,6 +990,57 @@
       result = result.replace(plainLine, markdownLine);
     }
     return result;
+  }
+
+  function setCopyMarker(name, text) {
+    if (!name || !text) return;
+    try {
+      document.documentElement.setAttribute(name, text);
+      document.documentElement.setAttribute(name + '-length', String(text.length));
+    } catch (error) {}
+  }
+
+  function buildStructuredCopyText(contentRoot, sourceRoot) {
+    if (!contentRoot || !contentRoot.cloneNode) return '';
+    var fragment = document.createDocumentFragment();
+    fragment.appendChild(contentRoot.cloneNode(true));
+    rehydrateClonedLinks(fragment, sourceRoot || contentRoot);
+    extractLatexFromFragment(fragment);
+    var text = serializeStructuredFragment(fragment) || cleanText(fragment.textContent || '');
+    text = restoreMarkdownLinksFromFragmentText(text, fragment);
+    text = restoreMarkdownLinksFromSourceText(text, contentRoot);
+    if (sourceRoot && sourceRoot !== contentRoot) {
+      text = restoreMarkdownLinksFromSourceText(text, sourceRoot);
+    }
+    return restoreMarkdownLinksFromSourceText(text, document);
+  }
+
+  function normalizeTikaCopiedMarkdown(text) {
+    var parts = String(text || '').split(/(```[\s\S]*?```)/g);
+    for (var i = 0; i < parts.length; i += 2) {
+      parts[i] = parts[i].replace(/^(#{2,6})(\s)/gm, function (_, hashes, suffix) {
+        return hashes.slice(1) + suffix;
+      });
+    }
+    return parts.join('');
+  }
+
+  function copyTextWithMarker(text, markerName) {
+    if (!text) return Promise.resolve('');
+    var normalizedText = normalizeStructuredMarkdownForPaste(text);
+    return withClipboardCleanBypass(function () {
+      return navigator.clipboard.writeText(normalizedText);
+    }).then(function () {
+      setCopyMarker(markerName, normalizedText);
+      return normalizedText;
+    }).catch(function () {
+      return '';
+    });
+  }
+
+  function copyStructuredContentRoot(contentRoot, sourceRoot, markerName) {
+    var text = buildStructuredCopyText(contentRoot, sourceRoot);
+    return copyTextWithMarker(text, markerName);
   }
 
   function hasStructuredFragmentContent(fragment) {
@@ -1056,34 +1206,16 @@
         || turn.querySelector('[data-message-author-role="assistant"]')
         || turn;
       if (!contentRoot || !contentRoot.cloneNode) return;
-
-      var fragment = document.createDocumentFragment();
-      fragment.appendChild(contentRoot.cloneNode(true));
-      rehydrateClonedLinks(fragment, turn);
-      extractLatexFromFragment(fragment);
-      var text = serializeStructuredFragment(fragment) || cleanText(fragment.textContent || '');
-      var restoredText = restoreMarkdownLinksFromFragmentText(text, fragment);
-      restoredText = restoreMarkdownLinksFromSourceText(restoredText, contentRoot);
-      restoredText = restoreMarkdownLinksFromSourceText(restoredText, turn);
-      restoredText = restoreMarkdownLinksFromSourceText(restoredText, document);
+      var text = buildStructuredCopyText(contentRoot, turn);
       var hasPendingDecoratedLinks = !!turn.querySelector('a.decorated-link:not([href])');
-      if (restoredText === text && hasPendingDecoratedLinks && attempt < 5) {
+      if (hasPendingDecoratedLinks && attempt < 5 && !/\]\([^)]+\)/.test(text)) {
         setTimeout(function () {
           finalizeCopy(attempt + 1);
         }, 50);
         return;
       }
-      text = restoredText;
       if (!text) return;
-
-      withClipboardCleanBypass(function () {
-        return navigator.clipboard.writeText(text);
-      }).then(function () {
-        try {
-          document.documentElement.setAttribute('data-copy-cleaner-chatgpt-copy', text);
-          document.documentElement.setAttribute('data-copy-cleaner-chatgpt-copy-length', String(text.length));
-        } catch (error) {}
-      }).catch(function () {});
+      copyStructuredContentRoot(contentRoot, turn, 'data-copy-cleaner-chatgpt-copy');
     }
 
     setTimeout(function () {
@@ -1091,7 +1223,30 @@
     }, 0);
   }
 
+  function onTikaCopyButtonClick(e) {
+    if (!e.target || !e.target.closest || !/https:\/\/tika\.byteintl\.net\//.test(String(window.location && window.location.href || ''))) {
+      return;
+    }
+    var button = e.target.closest('button');
+    if (!button || !button.querySelector || !button.querySelector('.i-icon-copy')) return;
+    var toolbar = button.closest('.pt-2.flex.items-center');
+    if (!toolbar) return;
+    var answerRoot = toolbar.closest('.chat-answer-area');
+    if (!answerRoot) return;
+
+    e.preventDefault();
+    e.stopImmediatePropagation();
+
+    setTimeout(function () {
+      copyTextWithMarker(
+        normalizeTikaCopiedMarkdown(buildStructuredCopyText(answerRoot, answerRoot)),
+        'data-copy-cleaner-tika-copy'
+      );
+    }, 0);
+  }
+
   window.addEventListener('copy', onCopy, true);
   window.addEventListener('keydown', onKeydown, true);
   window.addEventListener('click', onChatGptCopyButtonClick, true);
+  window.addEventListener('click', onTikaCopyButtonClick, true);
 })();
