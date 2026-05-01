@@ -213,6 +213,17 @@ function createElement(tagName, children) {
   return element;
 }
 
+function createLink(href, text) {
+  const link = createElement('A', [createTextNode(text)]);
+  link.getAttribute = function (name) {
+    return name === 'href' ? href : '';
+  };
+  link.hasAttribute = function (name) {
+    return name === 'href';
+  };
+  return link;
+}
+
 function createFragment(children) {
   const fragment = {
     nodeType: 11,
@@ -254,6 +265,40 @@ test('copy cleaner preserves inline code when structured fragments are serialize
   assert.equal(
     extractFragmentText(fragment, '请运行 const x = 1 再继续'),
     '请运行 `const x = 1` 再继续'
+  );
+});
+
+test('copy cleaner preserves quotes inside inline code when structured fragments are serialized', () => {
+  const { extractFragmentText } = loadCopyCleanerExports();
+  const fragment = createFragment([
+    createElement('P', [
+      createTextNode('行内代码：'),
+      createElement('CODE', [createTextNode('print("Hello")')]),
+    ]),
+  ]);
+
+  assert.equal(
+    extractFragmentText(fragment, '行内代码：print("Hello")'),
+    '行内代码：`print("Hello")`'
+  );
+});
+
+test('copy cleaner preserves markdown links when structured fragments are serialized', () => {
+  const { extractFragmentText } = loadCopyCleanerExports();
+  const fragment = createFragment([
+    createElement('UL', [
+      createElement('LI', [
+        createElement('P', [
+          createTextNode('链接：'),
+          createLink('https://www.baidu.com', '百度'),
+        ]),
+      ]),
+    ]),
+  ]);
+
+  assert.equal(
+    extractFragmentText(fragment, '链接：百度'),
+    '- 链接：[百度](https://www.baidu.com)'
   );
 });
 

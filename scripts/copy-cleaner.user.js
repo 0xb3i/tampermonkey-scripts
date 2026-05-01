@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         复制净化器
 // @namespace    https://github.com/tampermonkey-scripts
-// @version      5.0.5
+// @version      5.0.6
 // @description  复制时自动去除加粗/括号/引号，并将数学公式提取为 LaTeX $$ 格式，兼容网站自带复制按钮
 // @author       beibei
 // @match        *://*/*
@@ -630,6 +630,11 @@
     if (/\s$/.test(normalized)) state.value += ' ';
   }
 
+  function appendStructuredLiteralText(state, text) {
+    if (!text) return;
+    state.value += String(text);
+  }
+
   function appendStructuredLineBreak(state) {
     state.value = state.value.replace(/[ \t]+$/, '');
     if (state.value && !/\n$/.test(state.value)) state.value += '\n';
@@ -671,7 +676,7 @@
         appendStructuredBlock(state, blockFence + '\n' + blockCodeText + '\n' + blockFence);
         return;
       }
-      appendStructuredText(state, formatInlineCode(node.textContent));
+      appendStructuredLiteralText(state, formatInlineCode(getRenderedText(node) || node.textContent));
       return;
     }
 
@@ -809,6 +814,83 @@
     var state = { value: '' };
     serializeStructuredNode(fragment, state);
     return finalizeStructuredValue(state.value);
+  }
+
+  function rehydrateClonedLinks(fragment, sourceRoot) {
+    if (!fragment || !fragment.querySelectorAll || !sourceRoot || !sourceRoot.querySelectorAll) return;
+    var sourceAnchors = sourceRoot.querySelectorAll('a[href]');
+    var exactLookup = {};
+    var textLookup = {};
+    for (var i = 0; i < sourceAnchors.length; i++) {
+      var sourceAnchor = sourceAnchors[i];
+      var sourceText = normalizeStructuredText(getRenderedText(sourceAnchor) || sourceAnchor.textContent || '').trim();
+      var sourceHref = getAttributeValue(sourceAnchor, 'href');
+      if (!sourceText || !sourceHref) continue;
+      var sourceKey = [
+        getAttributeValue(sourceAnchor, 'data-start'),
+        getAttributeValue(sourceAnchor, 'data-end'),
+        sourceText,
+      ].join('|');
+      exactLookup[sourceKey] = sourceHref;
+      if (!textLookup[sourceText]) textLookup[sourceText] = sourceHref;
+    }
+
+    var clonedAnchors = fragment.querySelectorAll('a');
+    for (var j = 0; j < clonedAnchors.length; j++) {
+      var clonedAnchor = clonedAnchors[j];
+      if (getAttributeValue(clonedAnchor, 'href')) continue;
+      var clonedText = normalizeStructuredText(getRenderedText(clonedAnchor) || clonedAnchor.textContent || '').trim();
+      if (!clonedText) continue;
+      var clonedKey = [
+        getAttributeValue(clonedAnchor, 'data-start'),
+        getAttributeValue(clonedAnchor, 'data-end'),
+        clonedText,
+      ].join('|');
+      var matchedHref = exactLookup[clonedKey] || textLookup[clonedText] || '';
+      if (matchedHref) {
+        clonedAnchor.setAttribute('href', matchedHref);
+      }
+    }
+  }
+
+  function restoreMarkdownLinksFromFragmentText(text, fragment) {
+    if (!text || !fragment || !fragment.querySelectorAll) return text;
+    var anchors = fragment.querySelectorAll('a');
+    var seen = [];
+    var result = text;
+    for (var i = 0; i < anchors.length; i++) {
+      var anchor = anchors[i];
+      if (hasAttributeValue(anchor, 'data-footnote-ref') || hasAttributeValue(anchor, 'data-footnote-backref')) continue;
+      var container = anchor.closest ? anchor.closest('p, li, td, th, blockquote') : anchor.parentElement;
+      if (!container || seen.indexOf(container) >= 0) continue;
+      seen.push(container);
+      var markdownLine = getInlineNodeText(container, { lineBreakToken: ' ' }).trim();
+      if (!/\]\([^)]+\)/.test(markdownLine)) continue;
+      var plainLine = normalizeStructuredText(getRenderedText(container) || container.textContent || '').trim();
+      if (!plainLine || plainLine === markdownLine) continue;
+      result = result.replace(plainLine, markdownLine);
+    }
+    return result;
+  }
+
+  function restoreMarkdownLinksFromSourceText(text, sourceRoot) {
+    if (!text || !sourceRoot || !sourceRoot.querySelectorAll) return text;
+    var anchors = sourceRoot.querySelectorAll('a[href]');
+    var seen = [];
+    var result = text;
+    for (var i = 0; i < anchors.length; i++) {
+      var anchor = anchors[i];
+      if (hasAttributeValue(anchor, 'data-footnote-ref') || hasAttributeValue(anchor, 'data-footnote-backref')) continue;
+      var container = anchor.closest ? anchor.closest('p, li, td, th, blockquote') : anchor.parentElement;
+      if (!container || seen.indexOf(container) >= 0) continue;
+      seen.push(container);
+      var markdownLine = getInlineNodeText(container, { lineBreakToken: ' ' }).trim();
+      if (!/\]\([^)]+\)/.test(markdownLine)) continue;
+      var plainLine = normalizeStructuredText(getRenderedText(container) || container.textContent || '').trim();
+      if (!plainLine || plainLine === markdownLine) continue;
+      result = result.replace(plainLine, markdownLine);
+    }
+    return result;
   }
 
   function hasStructuredFragmentContent(fragment) {
@@ -966,28 +1048,61 @@
     if (dataTurn !== 'assistant' && !/复制回复|copy response/i.test(ariaLabel)) return;
     if (!turn || !turn.querySelector) return;
 
-    var contentRoot = turn.querySelector('[data-message-author-role="assistant"] .markdown')
-      || turn.querySelector('[data-message-author-role="assistant"]')
-      || turn;
-    if (!contentRoot || !contentRoot.cloneNode) return;
-
-    var fragment = document.createDocumentFragment();
-    fragment.appendChild(contentRoot.cloneNode(true));
-    extractLatexFromFragment(fragment);
-    var text = serializeStructuredFragment(fragment) || cleanText(fragment.textContent || '');
-    if (!text) return;
+    // #region debug-point A:click-entry
+    var reportDebug = function (hypothesisId, msg, data) { fetch('http://127.0.0.1:7777/event', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ sessionId: 'chatgpt-link-restore', runId: 'pre-fix', hypothesisId: hypothesisId, location: 'copy-cleaner.user.js:onChatGptCopyButtonClick', msg: '[DEBUG] ' + msg, data: data || {}, ts: Date.now() }) }).catch(function () {}); };
+    reportDebug('A', 'copy-click-enter', { ariaLabel: ariaLabel, dataTurn: dataTurn, turnTestId: String(turn.getAttribute('data-testid') || ''), decoratedHrefCount: turn.querySelectorAll('a.decorated-link[href]').length, decoratedNoHrefCount: turn.querySelectorAll('a.decorated-link:not([href])').length });
+    // #endregion
 
     e.preventDefault();
     e.stopImmediatePropagation();
 
-    withClipboardCleanBypass(function () {
-      return navigator.clipboard.writeText(text);
-    }).then(function () {
-      try {
-        document.documentElement.setAttribute('data-copy-cleaner-chatgpt-copy', text);
-        document.documentElement.setAttribute('data-copy-cleaner-chatgpt-copy-length', String(text.length));
-      } catch (error) {}
-    }).catch(function () {});
+    function finalizeCopy(attempt) {
+      var contentRoot = turn.querySelector('[data-message-author-role="assistant"] .markdown')
+        || turn.querySelector('[data-message-author-role="assistant"]')
+        || turn;
+      if (!contentRoot || !contentRoot.cloneNode) return;
+
+      var fragment = document.createDocumentFragment();
+      fragment.appendChild(contentRoot.cloneNode(true));
+      rehydrateClonedLinks(fragment, turn);
+      extractLatexFromFragment(fragment);
+      var text = serializeStructuredFragment(fragment) || cleanText(fragment.textContent || '');
+      var restoredText = restoreMarkdownLinksFromFragmentText(text, fragment);
+      restoredText = restoreMarkdownLinksFromSourceText(restoredText, contentRoot);
+      restoredText = restoreMarkdownLinksFromSourceText(restoredText, turn);
+      restoredText = restoreMarkdownLinksFromSourceText(restoredText, document);
+      var hasPendingDecoratedLinks = !!turn.querySelector('a.decorated-link:not([href])');
+      // #region debug-point B:attempt-state
+      reportDebug('B', 'finalize-attempt', { attempt: attempt, contentRootDecoratedHrefCount: contentRoot.querySelectorAll('a.decorated-link[href]').length, contentRootDecoratedNoHrefCount: contentRoot.querySelectorAll('a.decorated-link:not([href])').length, turnDecoratedHrefCount: turn.querySelectorAll('a.decorated-link[href]').length, turnDecoratedNoHrefCount: turn.querySelectorAll('a.decorated-link:not([href])').length, documentDecoratedHrefCount: document.querySelectorAll('a.decorated-link[href]').length, textHasPlainBaidu: text.indexOf('- 链接：百度') !== -1, restoredHasMarkdownBaidu: restoredText.indexOf('[百度](https://www.baidu.com)') !== -1 });
+      // #endregion
+      if (restoredText === text && hasPendingDecoratedLinks && attempt < 5) {
+        // #region debug-point C:retry
+        reportDebug('C', 'retry-scheduled', { attempt: attempt, nextAttempt: attempt + 1, pendingDecoratedLinks: true });
+        // #endregion
+        setTimeout(function () {
+          finalizeCopy(attempt + 1);
+        }, 50);
+        return;
+      }
+      text = restoredText;
+      if (!text) return;
+
+      withClipboardCleanBypass(function () {
+        return navigator.clipboard.writeText(text);
+      }).then(function () {
+        // #region debug-point D:clipboard-write
+        reportDebug('D', 'clipboard-written', { attempt: attempt, finalHasMarkdownBaidu: text.indexOf('[百度](https://www.baidu.com)') !== -1, finalHasPlainBaidu: text.indexOf('- 链接：百度') !== -1, finalLength: text.length });
+        // #endregion
+        try {
+          document.documentElement.setAttribute('data-copy-cleaner-chatgpt-copy', text);
+          document.documentElement.setAttribute('data-copy-cleaner-chatgpt-copy-length', String(text.length));
+        } catch (error) {}
+      }).catch(function () {});
+    }
+
+    setTimeout(function () {
+      finalizeCopy(0);
+    }, 0);
   }
 
   window.addEventListener('copy', onCopy, true);

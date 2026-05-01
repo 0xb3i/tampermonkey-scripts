@@ -54,3 +54,19 @@ test('buildTextMismatchSummary reports exact match when texts are equal after no
     }
   );
 });
+
+test('buildTextMismatchSummary can ignore footnote lines for real browser oracle comparison', () => {
+  assert.deepEqual(
+    buildTextMismatchSummary(
+      '正文\n脚注示例：\n这是一个脚注1。\n[^1]: https://example.com',
+      '正文',
+      [/^脚注示例：$/, /^这是一个脚注\d+[。.]?$/, /^\[\^\d+\]:/]
+    ),
+    {
+      matches: true,
+      firstDiffIndex: -1,
+      expectedFragment: '',
+      actualFragment: '',
+    }
+  );
+});

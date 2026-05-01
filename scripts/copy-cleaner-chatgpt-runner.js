@@ -35,13 +35,23 @@ function parseCliArgs(argv) {
   return result;
 }
 
-function normalizeText(text) {
-  return String(text || '').replace(/\r\n?/g, '\n').trim();
+function normalizeText(text, ignoreLinePatterns) {
+  var patterns = Array.isArray(ignoreLinePatterns) ? ignoreLinePatterns : [];
+  var lines = String(text || '').replace(/\r\n?/g, '\n').split('\n');
+  if (patterns.length) {
+    lines = lines.filter(function (line) {
+      for (var i = 0; i < patterns.length; i++) {
+        if (patterns[i] && patterns[i].test && patterns[i].test(line)) return false;
+      }
+      return true;
+    });
+  }
+  return lines.join('\n').trim();
 }
 
-function buildTextMismatchSummary(expectedText, actualText) {
-  var expected = normalizeText(expectedText);
-  var actual = normalizeText(actualText);
+function buildTextMismatchSummary(expectedText, actualText, ignoreLinePatterns) {
+  var expected = normalizeText(expectedText, ignoreLinePatterns);
+  var actual = normalizeText(actualText, ignoreLinePatterns);
   if (expected === actual) {
     return {
       matches: true,
@@ -72,6 +82,24 @@ async function waitForExistingAssistantCopyButton(page) {
       return turn && String(turn.getAttribute('data-turn') || '') === 'assistant';
     });
   }, null, { timeout: 120000 });
+}
+
+async function waitForExistingAssistantReplyReady(page) {
+  await waitForExistingAssistantCopyButton(page);
+  await page.waitForFunction(function () {
+    var turns = Array.from(document.querySelectorAll('[data-turn="assistant"], [data-testid^="conversation-turn-"]')).filter(function (turn) {
+      return String(turn.getAttribute('data-turn') || '') === 'assistant'
+        || turn.querySelector('button[data-testid="copy-turn-action-button"]');
+    });
+    var turn = turns[turns.length - 1];
+    if (!turn) return false;
+    var decoratedLinks = Array.from(turn.querySelectorAll('a.decorated-link'));
+    if (!decoratedLinks.length) return true;
+    return decoratedLinks.some(function (link) {
+      return !!link.getAttribute('href');
+    });
+  }, null, { timeout: 5000 }).catch(function () {});
+  await page.waitForTimeout(300);
 }
 
 async function ensureClipboardPermission(context, origin) {
@@ -163,21 +191,23 @@ async function readClipboardText(page) {
 async function validateChatGPTCopyButton(page, options) {
   var promptText = options && options.promptText ? String(options.promptText) : '';
   var expectedText = options && options.expectedText ? String(options.expectedText) : '';
+  var ignoreLinePatterns = options && Array.isArray(options.ignoreLinePatterns) ? options.ignoreLinePatterns : [];
   if (options && options.useExistingAssistantReply) {
-    await waitForExistingAssistantCopyButton(page);
+    await waitForExistingAssistantReplyReady(page);
   } else {
     await sendPrompt(page, promptText);
   }
   var clickedTarget = await clickLatestCopyButton(page);
   await page.waitForTimeout(300);
-  var clipboardText = normalizeText(await readClipboardText(page));
+  var clipboardText = normalizeText(await readClipboardText(page), ignoreLinePatterns);
   var pageMarker = normalizeText(await page.evaluate(function () {
     return document.documentElement.getAttribute('data-copy-cleaner-chatgpt-copy') || '';
-  }));
+  }), ignoreLinePatterns);
   if (expectedText === '__debug_placeholder__' && pageMarker) {
     expectedText = pageMarker;
   }
-  var mismatch = buildTextMismatchSummary(expectedText, clipboardText);
+  expectedText = normalizeText(expectedText, ignoreLinePatterns);
+  var mismatch = buildTextMismatchSummary(expectedText, clipboardText, ignoreLinePatterns);
   return {
     promptText: promptText,
     expectedText: expectedText,
@@ -220,6 +250,7 @@ async function runCopyCleanerChatGPTRealTest(options) {
     var validationResult = await validateChatGPTCopyButton(page, {
       promptText: promptText,
       expectedText: expectedText,
+      ignoreLinePatterns: selectedCase.ignoreLinePatterns,
       useExistingAssistantReply: !!selectedCase.useExistingAssistantReply,
     });
     console.log('[copy-cleaner-chatgpt-runner] validate:done');

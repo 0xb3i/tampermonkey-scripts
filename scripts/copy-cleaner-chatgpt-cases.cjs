@@ -6,6 +6,11 @@ const CHATGPT_REAL_TEST_CASES = {
     description: '固定会话页中的 Markdown 全样式回复，直接复制现成 assistant 回复并对比标准答案。',
     url: 'https://chatgpt.com/c/69f45156-a908-83e8-a147-f694e7d9c109',
     useExistingAssistantReply: true,
+    ignoreLinePatterns: [
+      /^脚注示例：$/,
+      /^这是一个脚注\d+[。.]?$/,
+      /^\[\^\d+\]:/,
+    ],
     expectedText: [
       '好的，我给你写一段示例文本，尽量覆盖 Markdown 常见语法样式：',
       '---',

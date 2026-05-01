@@ -174,14 +174,21 @@ function buildSyncVerificationMarkers(scriptSource) {
   var source = String(scriptSource || '').replace(/\r\n?/g, '\n');
   var lines = source.split('\n').map(function (line) {
     return line.trim();
-  }).filter(Boolean);
-  return lines.filter(function (line) {
+  }).filter(Boolean).filter(function (line) {
     return line.length >= 24 && line.indexOf('// @version') !== 0;
-  }).slice(0, 12);
+  });
+  if (lines.length <= 12) return lines;
+  var result = [];
+  for (var i = 0; i < 12; i++) {
+    var index = Math.floor((i * (lines.length - 1)) / 11);
+    if (result.indexOf(lines[index]) === -1) result.push(lines[index]);
+  }
+  return result;
 }
 
 async function readTargetEditorState(page, meta) {
   var markers = buildSyncVerificationMarkers(meta && meta.scriptSource ? meta.scriptSource : '');
+  var normalizedSource = String(meta && meta.scriptSource ? meta.scriptSource : '').replace(/\r\n?/g, '\n');
   return page.evaluate(function (payload) {
     var codeMirrors = Array.from(document.querySelectorAll('.CodeMirror'));
     var target = codeMirrors.map(function (el) {
@@ -205,14 +212,17 @@ async function readTargetEditorState(page, meta) {
     var matchedMarkers = payload.markers.filter(function (marker) {
       return normalized.indexOf(marker) !== -1;
     });
+    var exactMatch = normalized === payload.scriptSource;
     return {
       found: true,
       value: normalized,
       matchedMarkers: matchedMarkers,
+      exactMatch: exactMatch,
     };
   }, {
     name: meta && meta.name ? String(meta.name) : '',
     markers: markers,
+    scriptSource: normalizedSource,
   });
 }
 
@@ -281,7 +291,7 @@ async function syncTampermonkeyScript(page, options) {
   if (!editorState.found) {
     throw new Error('Tampermonkey editor instance for ' + meta.name + ' not found.');
   }
-  if (editorState.value.indexOf(scriptSource.replace(/\r\n?/g, '\n')) === -1 && editorState.matchedMarkers.length < 3) {
+  if (!editorState.exactMatch) {
     throw new Error('Tampermonkey editor content did not match the local userscript source.');
   }
 
