@@ -9,7 +9,7 @@ function loadCopyCleanerExports() {
   const source = fs.readFileSync(filePath, 'utf8');
   const instrumented = source.replace(
     /\}\)\(\);\s*$/,
-    "window.__copyCleanerTestExports = { cleanText: cleanText, splitByLatex: splitByLatex, buildClipboardPayloadFromSelection: buildClipboardPayloadFromSelection, serializeStructuredFragment: serializeStructuredFragment, extractFragmentText: extractFragmentText };})();"
+    "window.__copyCleanerTestExports = { cleanText: cleanText, splitByLatex: splitByLatex, normalizeClipboardText: normalizeClipboardText, buildClipboardPayloadFromSelection: buildClipboardPayloadFromSelection, serializeStructuredFragment: serializeStructuredFragment, extractFragmentText: extractFragmentText };})();"
   );
 
   if (instrumented === source) {
@@ -97,6 +97,41 @@ test('copy cleaner selection payload only intercepts when text actually changes'
       toString: function () { return 'Hello'; },
     }),
     null
+  );
+});
+
+test('copy cleaner keeps indentation for plain code copied through clipboard text path', () => {
+  const { normalizeClipboardText } = loadCopyCleanerExports();
+  const code = 'def foo():\n    x = 1\n\n    if x:\n        print(x)';
+  assert.equal(normalizeClipboardText(code), code);
+});
+
+test('copy cleaner preserves fenced code blocks when normalizing markdown clipboard text', () => {
+  const { normalizeClipboardText } = loadCopyCleanerExports();
+  const input = [
+    '**说明**',
+    '```python',
+    'def foo():',
+    '    x = 1',
+    '',
+    '    if x:',
+    '        print(x)',
+    '```',
+    '**结束**',
+  ].join('\n');
+  assert.equal(
+    normalizeClipboardText(input),
+    [
+      '说明',
+      '```python',
+      'def foo():',
+      '    x = 1',
+      '',
+      '    if x:',
+      '        print(x)',
+      '```',
+      '结束',
+    ].join('\n')
   );
 });
 
@@ -233,5 +268,28 @@ test('copy cleaner preserves fenced code blocks for wrapped pre/code structures'
   assert.equal(
     serializeStructuredFragment(fragment),
     '```\nfor i in range(3):\n    print(i)\n```'
+  );
+});
+
+test('copy cleaner uses rendered code layout when chatgpt code DOM stores line breaks as br tags', () => {
+  const { serializeStructuredFragment } = loadCopyCleanerExports();
+  const code = createElement('CODE', [
+    createTextNode('def foo():'),
+    createElement('BR'),
+    createTextNode('\u00a0\u00a0\u00a0\u00a0x = 1'),
+    createElement('BR'),
+    createElement('BR'),
+    createTextNode('\u00a0\u00a0\u00a0\u00a0if x:'),
+    createElement('BR'),
+    createTextNode('\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0print(x)'),
+  ]);
+  code.innerText = 'def foo():\n    x = 1\n\n    if x:\n        print(x)';
+  const fragment = createFragment([
+    createElement('PRE', [code]),
+  ]);
+
+  assert.equal(
+    serializeStructuredFragment(fragment),
+    '```\ndef foo():\n    x = 1\n\n    if x:\n        print(x)\n```'
   );
 });

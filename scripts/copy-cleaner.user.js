@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         复制净化器
 // @namespace    https://github.com/tampermonkey-scripts
-// @version      5.0.0
+// @version      5.0.5
 // @description  复制时自动去除加粗/括号/引号，并将数学公式提取为 LaTeX $$ 格式，兼容网站自带复制按钮
 // @author       beibei
 // @match        *://*/*
@@ -108,20 +108,36 @@
     return parts.join('');
   }
 
+  function cleanTextOutsideCodeFences(text) {
+    var parts = String(text || '').split(/(```[\s\S]*?```)/g);
+    var result = '';
+    for (var i = 0; i < parts.length; i += 2) {
+      parts[i] = cleanText(parts[i]);
+    }
+    for (var j = 0; j < parts.length; j++) {
+      var part = parts[j];
+      if (!part) continue;
+      var isFence = j % 2 === 1;
+      if (isFence && result && !/\n$/.test(result)) result += '\n';
+      result += part;
+      if (isFence && j < parts.length - 1 && parts[j + 1] && !/^\n/.test(parts[j + 1])) result += '\n';
+    }
+    return result;
+  }
+
+  function looksLikePlainCodeCopy(text) {
+    text = String(text || '').replace(/\r\n?/g, '\n');
+    if (text.indexOf('\n') === -1 || /```/.test(text)) return false;
+    return /(^|\n)( {2,}|\t)\S/.test(text) &&
+      /(^|\n)(def |class |if |elif |else:|for |while |try:|except |return |const |let |var |function |import |from |print\(|console\.)/.test(text);
+  }
+
   function normalizeClipboardText(text) {
-    var cleaned = cleanText(text);
+    if (looksLikePlainCodeCopy(text)) return String(text || '').replace(/\r\n?/g, '\n');
+    var cleaned = cleanTextOutsideCodeFences(text);
     return looksLikeMarkdownCopy(cleaned)
       ? compactMarkdownBlankLines(cleaned)
       : cleaned;
-  }
-
-  var LATEX_DELIMITERS = {
-    inline: ['$', '$'],
-    display: ['$$', '$$'],
-  };
-
-  function getLatexDelimiters(isDisplay) {
-    return isDisplay ? LATEX_DELIMITERS.display : LATEX_DELIMITERS.inline;
   }
 
   function getLatexDataAttr(isDisplay) {
@@ -138,8 +154,30 @@
   }
 
   function formatLatexText(latex, isDisplay) {
-    var delimiters = getLatexDelimiters(isDisplay);
-    return delimiters[0] + latex + delimiters[1];
+    var delimiter = isDisplay ? '$$' : '$';
+    return delimiter + latex + delimiter;
+  }
+
+  function formatInlineCode(text) {
+    return '`' + String(text || '').replace(/\r\n?/g, '\n').replace(/\n+/g, ' ').replace(/`/g, '\\`').replace(/\|/g, '\\|') + '`';
+  }
+
+  function getPreformattedText(node) {
+    if (!node) return '';
+    if (node.nodeType === Node.TEXT_NODE) {
+      return String(node.nodeValue || '').replace(/\u00a0/g, ' ');
+    }
+    if (node.nodeType !== Node.ELEMENT_NODE && node.nodeType !== Node.DOCUMENT_FRAGMENT_NODE) {
+      return '';
+    }
+    if (node.nodeType === Node.ELEMENT_NODE && node.tagName === 'BR') {
+      return '\n';
+    }
+    var text = '';
+    for (var child = node.firstChild; child; child = child.nextSibling) {
+      text += getPreformattedText(child);
+    }
+    return text.replace(/\r\n?/g, '\n');
   }
 
   function annotateKatexElement(el) {
@@ -192,37 +230,28 @@
       }
     }
 
-    function tryPatch() {
-      if (window.katex) {
-        doPatch(window.katex);
-        return true;
-      }
-      return false;
+    if (window.katex) {
+      doPatch(window.katex);
+      return;
     }
 
-    if (!tryPatch()) {
-      var katexDescriptor = Object.getOwnPropertyDescriptor(window, 'katex');
-      var _katexValue = katexDescriptor ? katexDescriptor.value : undefined;
+    var katexDescriptor = Object.getOwnPropertyDescriptor(window, 'katex');
+    var _katexValue = katexDescriptor ? katexDescriptor.value : undefined;
 
-      Object.defineProperty(window, 'katex', {
-        configurable: true,
-        enumerable: true,
-        get: function () { return _katexValue; },
-        set: function (val) {
-          _katexValue = val;
-          if (val && typeof val === 'object') {
-            doPatch(val);
-          }
+    Object.defineProperty(window, 'katex', {
+      configurable: true,
+      enumerable: true,
+      get: function () { return _katexValue; },
+      set: function (val) {
+        _katexValue = val;
+        if (val && typeof val === 'object') {
+          doPatch(val);
         }
-      });
-    }
+      }
+    });
   }
 
   patchKaTeX();
-
-  function annotateExistingKatex() {
-    annotateKatexTree(document.body || document.documentElement);
-  }
 
   var mathObserver = new MutationObserver(function (mutations) {
     for (var i = 0; i < mutations.length; i++) {
@@ -239,7 +268,7 @@
     mathObserver.observe(document.body, { childList: true, subtree: true });
   } else {
     document.addEventListener('DOMContentLoaded', function () {
-      annotateExistingKatex();
+      annotateKatexTree(document.body || document.documentElement);
       mathObserver.observe(document.body, { childList: true, subtree: true });
     });
   }
@@ -309,33 +338,14 @@
     return fragment;
   }
 
-  function closestKatex(node) {
-    var element = node instanceof Element ? node : node.parentElement;
-    return element && element.closest('.katex');
-  }
-
-  function getListItemPrefix(list, itemIndex) {
-    if (!list || list.tagName !== 'OL') return '- ';
-    var start = parseInt(list.getAttribute('start') || '1', 10);
-    if (isNaN(start)) start = 1;
-    return (start + itemIndex) + '. ';
-  }
-
-  function getListItemIndex(item) {
-    var index = 0;
-    while (item && item.previousElementSibling) {
-      item = item.previousElementSibling;
-      if (item.tagName === 'LI') index++;
-    }
-    return index;
+  function extractLatexFromFragment(fragment) {
+    extractLatexFromKatex(fragment);
+    extractLatexFromMathJax(fragment);
+    return fragment;
   }
 
   function isBlockElement(node) {
     return node && node.nodeType === Node.ELEMENT_NODE && /^(ADDRESS|ARTICLE|ASIDE|BLOCKQUOTE|DIV|DL|FIELDSET|FIGCAPTION|FIGURE|FOOTER|FORM|H[1-6]|HEADER|HR|LI|MAIN|NAV|OL|P|PRE|SECTION|TABLE|TR|UL)$/.test(node.tagName);
-  }
-
-  function createStructuredState() {
-    return { value: '' };
   }
 
   function finalizeStructuredValue(value) {
@@ -345,18 +355,16 @@
       .trim();
   }
 
-  function getStructuredNodeText(node) {
-    var nestedState = createStructuredState();
-    for (var child = node.firstChild; child; child = child.nextSibling) {
-      serializeStructuredNode(child, nestedState);
+  function getStructuredText(node, includeSelf) {
+    var state = { value: '' };
+    if (includeSelf) {
+      serializeStructuredNode(node, state);
+    } else {
+      for (var child = node.firstChild; child; child = child.nextSibling) {
+        serializeStructuredNode(child, state);
+      }
     }
-    return finalizeStructuredValue(nestedState.value);
-  }
-
-  function getStructuredSingleNodeText(node) {
-    var nestedState = createStructuredState();
-    serializeStructuredNode(node, nestedState);
-    return finalizeStructuredValue(nestedState.value);
+    return finalizeStructuredValue(state.value);
   }
 
   function normalizeStructuredText(text) {
@@ -397,8 +405,7 @@
     }
 
     if (node.tagName === 'CODE') {
-      var codeText = node.textContent.replace(/\r\n?/g, '\n').replace(/\n+/g, ' ');
-      parts.push('`' + codeText.replace(/`/g, '\\`').replace(/\|/g, '\\|') + '`');
+      parts.push(formatInlineCode(node.textContent));
       return;
     }
 
@@ -528,8 +535,13 @@
     }
 
     if (node.tagName === 'CODE') {
-      var inlineCodeText = node.textContent.replace(/\r\n?/g, '\n').replace(/\n+/g, ' ');
-      appendStructuredText(state, '`' + inlineCodeText.replace(/`/g, '\\`').replace(/\|/g, '\\|') + '`');
+      if ((node.querySelector && node.querySelector('br')) || /\n/.test(getPreformattedText(node))) {
+        var blockCodeText = getPreformattedText(node).replace(/\n$/, '');
+        var blockFence = getCodeFence(blockCodeText);
+        appendStructuredBlock(state, blockFence + '\n' + blockCodeText + '\n' + blockFence);
+        return;
+      }
+      appendStructuredText(state, formatInlineCode(node.textContent));
       return;
     }
 
@@ -540,7 +552,16 @@
 
     if (node.tagName === 'LI') {
       appendStructuredLineBreak(state);
-      appendStructuredText(state, getListItemPrefix(node.parentElement, getListItemIndex(node)));
+      var itemIndex = 0;
+      for (var sibling = node.previousElementSibling; sibling; sibling = sibling.previousElementSibling) {
+        if (sibling.tagName === 'LI') itemIndex++;
+      }
+      if (node.parentElement && node.parentElement.tagName === 'OL') {
+        var start = parseInt(node.parentElement.getAttribute('start') || '1', 10);
+        appendStructuredText(state, (isNaN(start) ? 1 : start) + itemIndex + '. ');
+      } else {
+        appendStructuredText(state, '- ');
+      }
       var inlineParts = [];
       var nestedBlocks = [];
       for (var listChild = node.firstChild; listChild; listChild = listChild.nextSibling) {
@@ -558,9 +579,7 @@
         }
         serializeInlineNode(listChild, inlineParts, { lineBreakToken: ' ' });
       }
-      if (inlineParts.length) {
-        appendStructuredText(state, inlineParts.join('').trim());
-      }
+      if (inlineParts.length) appendStructuredText(state, inlineParts.join('').trim());
       for (var nestedIndex = 0; nestedIndex < nestedBlocks.length; nestedIndex++) {
         serializeStructuredNode(nestedBlocks[nestedIndex], state);
       }
@@ -569,15 +588,14 @@
     }
 
     if (/^H[1-6]$/.test(node.tagName)) {
-      var level = parseInt(node.tagName.charAt(1), 10);
-      appendStructuredBlock(state, new Array(level + 1).join('#') + ' ' + getStructuredNodeText(node));
+      appendStructuredBlock(state, new Array(parseInt(node.tagName.charAt(1), 10) + 1).join('#') + ' ' + getStructuredText(node, false));
       return;
     }
 
     if (node.tagName === 'BLOCKQUOTE') {
       var quoteParts = [];
       for (var quoteChild = node.firstChild; quoteChild; quoteChild = quoteChild.nextSibling) {
-        var quotePart = getStructuredSingleNodeText(quoteChild);
+        var quotePart = getStructuredText(quoteChild, true);
         if (quotePart) quoteParts.push(quotePart);
       }
       var quoteText = quoteParts.join('\n');
@@ -601,14 +619,14 @@
     if (node.tagName === 'PRE') {
       var codeChild = node.querySelector ? node.querySelector('code') : null;
       if (codeChild) {
-        var codeText = codeChild.textContent.replace(/\r\n?/g, '\n').replace(/\n$/, '');
+        var codeText = getPreformattedText(codeChild).replace(/\n$/, '');
         var fence = getCodeFence(codeText);
         appendStructuredBlock(state, fence + '\n' + codeText + '\n' + fence);
-        return;
+      } else {
+        appendStructuredLineBreak(state);
+        state.value += getPreformattedText(node).replace(/\n$/, '');
+        appendStructuredLineBreak(state);
       }
-      appendStructuredLineBreak(state);
-      state.value += node.textContent.replace(/\r\n?/g, '\n').replace(/\n$/, '');
-      appendStructuredLineBreak(state);
       return;
     }
 
@@ -625,7 +643,7 @@
   }
 
   function serializeStructuredFragment(fragment) {
-    var state = createStructuredState();
+    var state = { value: '' };
     serializeStructuredNode(fragment, state);
     return finalizeStructuredValue(state.value);
   }
@@ -642,60 +660,34 @@
     return typeof baseText === 'string' ? baseText : fragment.textContent;
   }
 
-  function resolveLatexSelectionPayload(selection) {
-    if (!selection || selection.rangeCount === 0) return null;
-
-    var range = selection.getRangeAt(0).cloneRange();
-
-    var startKatex = closestKatex(range.startContainer);
-    if (startKatex) { range.setStartBefore(startKatex); }
-
-    var endKatex = closestKatex(range.endContainer);
-    if (endKatex) { range.setEndAfter(endKatex); }
-
-    var fragment = range.cloneContents();
-
-    var hasMath = fragment.querySelector('.katex') ||
-                  fragment.querySelector('mjx-container') ||
-                  fragment.querySelector('[data-latex]') ||
-                  fragment.querySelector('[data-latex-display]');
-
-    if (!hasMath) return null;
-
-    extractLatexFromKatex(fragment);
-    extractLatexFromMathJax(fragment);
-
-    return {
-      text: extractFragmentText(fragment, fragment.textContent),
-      alreadyStructured: hasStructuredFragmentContent(fragment),
-    };
-  }
-
-  function extractStructuredSelectionText(selection) {
-    if (!selection || selection.rangeCount === 0) return null;
-    var fragment = selection.getRangeAt(0).cloneContents();
-    if (!hasStructuredFragmentContent(fragment)) return null;
-    return {
-      text: extractFragmentText(fragment, selection.toString()),
-    };
-  }
-
   function buildClipboardPayloadFromSelection(selection) {
     if (!selection || selection.isCollapsed) return null;
 
     var rawText = selection.toString();
-    var latexPayload = resolveLatexSelectionPayload(selection);
-    if (latexPayload !== null) {
-      return {
-        text: latexPayload.alreadyStructured ? latexPayload.text : cleanText(latexPayload.text),
-      };
-    }
+    if (selection.rangeCount) {
+      var range = selection.getRangeAt(0).cloneRange();
+      var startElement = range.startContainer instanceof Element ? range.startContainer : range.startContainer.parentElement;
+      var startKatex = startElement && startElement.closest('.katex');
+      if (startKatex) range.setStartBefore(startKatex);
+      var endElement = range.endContainer instanceof Element ? range.endContainer : range.endContainer.parentElement;
+      var endKatex = endElement && endElement.closest('.katex');
+      if (endKatex) range.setEndAfter(endKatex);
 
-    var structuredText = extractStructuredSelectionText(selection);
-    if (structuredText !== null) {
-      return structuredText.text !== rawText
-        ? { text: structuredText.text }
-        : null;
+      var fragment = range.cloneContents();
+      var hasMath = fragment.querySelector('.katex') ||
+        fragment.querySelector('mjx-container') ||
+        fragment.querySelector('[data-latex]') ||
+        fragment.querySelector('[data-latex-display]');
+      var hasStructured = hasStructuredFragmentContent(fragment);
+      if (hasMath) {
+        extractLatexFromFragment(fragment);
+        var mathText = extractFragmentText(fragment, fragment.textContent);
+        return { text: hasStructured ? mathText : cleanText(mathText) };
+      }
+      if (hasStructured) {
+        var structuredText = extractFragmentText(fragment, rawText);
+        return structuredText !== rawText ? { text: structuredText } : null;
+      }
     }
 
     if (!rawText) return null;
@@ -799,59 +791,38 @@
     }
   }
 
-  function findChatGptAssistantCopyButton(target) {
-    if (!target || !target.closest || !/https:\/\/chatgpt\.com\//.test(String(window.location && window.location.href || ''))) {
-      return null;
+  function onChatGptCopyButtonClick(e) {
+    if (!e.target || !e.target.closest || !/https:\/\/chatgpt\.com\//.test(String(window.location && window.location.href || ''))) {
+      return;
     }
-    var button = target.closest('button[data-testid="copy-turn-action-button"]');
-    if (!button) return null;
+    var button = e.target.closest('button[data-testid="copy-turn-action-button"]');
+    if (!button) return;
     var turn = button.closest('[data-turn], [data-testid^="conversation-turn-"]');
     var dataTurn = turn ? String(turn.getAttribute('data-turn') || '') : '';
     var ariaLabel = String(button.getAttribute('aria-label') || '');
-    if (dataTurn === 'assistant') return button;
-    if (/复制回复|copy response/i.test(ariaLabel)) return button;
-    return null;
-  }
+    if (dataTurn !== 'assistant' && !/复制回复|copy response/i.test(ariaLabel)) return;
+    if (!turn || !turn.querySelector) return;
 
-  function getChatGptAssistantContentRoot(button) {
-    if (!button || !button.closest) return '';
-    var turn = button.closest('[data-turn], [data-testid^="conversation-turn-"]');
-    if (!turn || !turn.querySelector) return null;
-    return turn.querySelector('[data-message-author-role="assistant"] .markdown')
+    var contentRoot = turn.querySelector('[data-message-author-role="assistant"] .markdown')
       || turn.querySelector('[data-message-author-role="assistant"]')
       || turn;
-  }
+    if (!contentRoot || !contentRoot.cloneNode) return;
 
-  function buildClipboardPayloadFromRoot(root) {
-    if (!root || !root.cloneNode) return null;
     var fragment = document.createDocumentFragment();
-    fragment.appendChild(root.cloneNode(true));
-    extractLatexFromKatex(fragment);
-    extractLatexFromMathJax(fragment);
-    var text = serializeStructuredFragment(fragment);
-    if (!text) {
-      text = cleanText(fragment.textContent || '');
-    }
-    return text ? { text: text } : null;
-  }
-
-  function onChatGptCopyButtonClick(e) {
-    var button = findChatGptAssistantCopyButton(e.target);
-    if (!button) return;
-
-    var contentRoot = getChatGptAssistantContentRoot(button);
-    var payload = buildClipboardPayloadFromRoot(contentRoot);
-    if (!payload || !payload.text) return;
+    fragment.appendChild(contentRoot.cloneNode(true));
+    extractLatexFromFragment(fragment);
+    var text = serializeStructuredFragment(fragment) || cleanText(fragment.textContent || '');
+    if (!text) return;
 
     e.preventDefault();
     e.stopImmediatePropagation();
 
     withClipboardCleanBypass(function () {
-      return navigator.clipboard.writeText(payload.text);
+      return navigator.clipboard.writeText(text);
     }).then(function () {
       try {
-        document.documentElement.setAttribute('data-copy-cleaner-chatgpt-copy', payload.text);
-        document.documentElement.setAttribute('data-copy-cleaner-chatgpt-copy-length', String(payload.text.length));
+        document.documentElement.setAttribute('data-copy-cleaner-chatgpt-copy', text);
+        document.documentElement.setAttribute('data-copy-cleaner-chatgpt-copy-length', String(text.length));
       } catch (error) {}
     }).catch(function () {});
   }
