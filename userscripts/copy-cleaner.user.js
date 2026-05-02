@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         复制净化器
 // @namespace    https://github.com/tampermonkey-scripts
-// @version      5.0.12
+// @version      5.1.0
 // @description  复制时自动去除加粗/括号/引号，并将数学公式提取为 LaTeX $$ 格式，兼容网站自带复制按钮
 // @author       beibei
 // @match        *://*/*
@@ -262,8 +262,121 @@
     return normalizeStructuredMarkdownForPaste(cleanStructuredMarkdownStyles(text));
   }
 
-  function isAiStudioPage() {
-    return /https:\/\/aistudio\.google\.com\//.test(String(window.location && window.location.href || ''));
+  var SITE_HANDLERS = [
+    {
+      match: function () { return /https:\/\/aistudio\.google\.com\//.test(String(window.location && window.location.href || '')); },
+      markerAttr: 'data-copy-cleaner-aistudio-copy',
+      normalizeForPaste: function (text) { return looksLikeMarkdownCopy(text) ? normalizeAiStudioMarkdownForPaste(text) : normalizeClipboardText(text); },
+      findCopyTarget: function (e) {
+        if (!e.target || !e.target.closest) return null;
+        var menuItem = e.target.closest('[role="menuitem"]');
+        var label = String(menuItem && (menuItem.innerText || menuItem.textContent || '') || '').trim();
+        if (!menuItem || !/copy as markdown/i.test(label)) return null;
+        return { type: 'clipboard-readwrite' };
+      },
+      performCopy: function (target, markerAttr) {
+        setTimeout(function () {
+          copyAiStudioMarkdownFromClipboard(markerAttr);
+        }, 300);
+      },
+    },
+    {
+      match: function () { return /https:\/\/chatgpt\.com\//.test(String(window.location && window.location.href || '')); },
+      markerAttr: 'data-copy-cleaner-chatgpt-copy',
+      normalizeForPaste: normalizeClipboardText,
+      findCopyTarget: function (e) {
+        if (!e.target || !e.target.closest) return null;
+        var button = e.target.closest('button[data-testid="copy-turn-action-button"]');
+        if (!button) return null;
+        var turn = button.closest('[data-turn], [data-testid^="conversation-turn-"]');
+        var dataTurn = turn ? String(turn.getAttribute('data-turn') || '') : '';
+        var ariaLabel = String(button.getAttribute('aria-label') || '');
+        if (dataTurn !== 'assistant' && !/复制回复|copy response/i.test(ariaLabel)) return null;
+        if (!turn || !turn.querySelector) return null;
+        return { type: 'structured-intercept', turn: turn };
+      },
+      performCopy: function (target, markerAttr) {
+        var turn = target.turn;
+        function finalizeCopy(attempt) {
+          var contentRoot = turn.querySelector('[data-message-author-role="assistant"] .markdown')
+            || turn.querySelector('[data-message-author-role="assistant"]')
+            || turn;
+          if (!contentRoot || !contentRoot.cloneNode) return;
+          var text = buildStructuredCopyText(contentRoot, turn);
+          var hasPendingDecoratedLinks = !!turn.querySelector('a.decorated-link:not([href])');
+          if (hasPendingDecoratedLinks && attempt < 5 && !/\]\([^)]+\)/.test(text)) {
+            setTimeout(function () { finalizeCopy(attempt + 1); }, 50);
+            return;
+          }
+          if (!text) return;
+          copyStructuredContentRoot(contentRoot, turn, markerAttr);
+        }
+        setTimeout(function () { finalizeCopy(0); }, 0);
+      },
+    },
+    {
+      match: function () { return /https:\/\/gemini\.google\.com\//.test(String(window.location && window.location.href || '')); },
+      markerAttr: 'data-copy-cleaner-gemini-copy',
+      normalizeForPaste: normalizeClipboardText,
+      findCopyTarget: function (e) {
+        if (!e.target || !e.target.closest) return null;
+        var button = e.target.closest('button[data-test-id="copy-button"][aria-label="Copy"]');
+        if (!button) return null;
+        var responseRoot = button.closest('response-container, .response-container');
+        if (!responseRoot) return null;
+        var contentRoot = responseRoot.querySelector('structured-content-container .markdown')
+          || responseRoot.querySelector('message-content .markdown')
+          || responseRoot.querySelector('.response-content .markdown')
+          || responseRoot.querySelector('.markdown');
+        if (!contentRoot) return null;
+        return { type: 'structured-intercept', contentRoot: contentRoot, sourceRoot: responseRoot };
+      },
+      performCopy: function (target, markerAttr) {
+        setTimeout(function () {
+          copyStructuredContentRoot(target.contentRoot, target.sourceRoot, markerAttr);
+        }, 0);
+      },
+    },
+    {
+      match: function () { return /https:\/\/tika\.byteintl\.net\//.test(String(window.location && window.location.href || '')); },
+      markerAttr: 'data-copy-cleaner-tika-copy',
+      normalizeForPaste: normalizeClipboardText,
+      findCopyTarget: function (e) {
+        if (!e.target || !e.target.closest) return null;
+        var button = e.target.closest('button');
+        if (!button || !button.querySelector || !button.querySelector('.i-icon-copy')) return null;
+        var toolbar = button.closest('.pt-2.flex.items-center');
+        if (!toolbar) return null;
+        var answerRoot = toolbar.closest('.chat-answer-area');
+        if (!answerRoot) return null;
+        return { type: 'structured-intercept', contentRoot: answerRoot, sourceRoot: answerRoot, tikaNormalize: true };
+      },
+      performCopy: function (target, markerAttr) {
+        setTimeout(function () {
+          copyTextWithMarker(
+            normalizeTikaCopiedMarkdown(buildStructuredCopyText(target.contentRoot, target.sourceRoot)),
+            markerAttr
+          );
+        }, 0);
+      },
+    },
+  ];
+
+  var _cachedSiteHandler = null;
+  var _cachedSiteHandlerUrl = '';
+
+  function getCurrentSiteHandler() {
+    var currentUrl = String(window.location && window.location.href || '');
+    if (_cachedSiteHandler && _cachedSiteHandlerUrl === currentUrl) return _cachedSiteHandler;
+    _cachedSiteHandlerUrl = currentUrl;
+    _cachedSiteHandler = null;
+    for (var i = 0; i < SITE_HANDLERS.length; i++) {
+      if (SITE_HANDLERS[i].match()) {
+        _cachedSiteHandler = SITE_HANDLERS[i];
+        break;
+      }
+    }
+    return _cachedSiteHandler;
   }
 
   function getLatexDataAttr(isDisplay) {
@@ -1293,24 +1406,6 @@
     });
   }
 
-  // #region debug-point A:reporter
-  function reportSelectionCopyDebug(hypothesisId, location, msg, data) {
-    if (typeof fetch !== 'function') return;
-    fetch('http://127.0.0.1:7777/event', {
-      method: 'POST',
-      body: JSON.stringify({
-        sessionId: 'selection-copy-regression',
-        runId: 'post-fix',
-        hypothesisId: hypothesisId,
-        location: location,
-        msg: '[DEBUG] ' + msg,
-        data: data || {},
-        ts: Date.now(),
-      }),
-    }).catch(function () {});
-  }
-  // #endregion
-
   function hasStructuredFragmentContent(fragment) {
     return !!(fragment && fragment.querySelector && fragment.querySelector('*'));
   }
@@ -1341,13 +1436,6 @@
     if (!selection || selection.isCollapsed) return null;
 
     var rawText = selection.toString();
-    // #region debug-point A:selection-entry
-    reportSelectionCopyDebug('A', 'copy-cleaner.user.js:1061', 'selection payload entry', {
-      rawTextLength: rawText ? rawText.length : 0,
-      rangeCount: selection.rangeCount || 0,
-      isCollapsed: !!selection.isCollapsed,
-    });
-    // #endregion
     if (selection.rangeCount) {
       var range = selection.getRangeAt(0).cloneRange();
       var startElement = range.startContainer instanceof Element ? range.startContainer : range.startContainer.parentElement;
@@ -1363,44 +1451,19 @@
         fragment.querySelector('[data-latex]') ||
         fragment.querySelector('[data-latex-display]');
       var hasStructured = hasStructuredFragmentContent(fragment);
-      // #region debug-point B:fragment-shape
-      reportSelectionCopyDebug('B', 'copy-cleaner.user.js:1076', 'selection fragment shape', {
-        hasMath: !!hasMath,
-        hasStructured: !!hasStructured,
-        fragmentTextLength: fragment && typeof fragment.textContent === 'string' ? fragment.textContent.length : 0,
-      });
-      // #endregion
       if (hasMath) {
         extractLatexFromFragment(fragment);
         var mathText = extractFragmentText(fragment, fragment.textContent);
-        // #region debug-point C:math-branch
-        reportSelectionCopyDebug('C', 'copy-cleaner.user.js:1080', 'selection math branch', {
-          structured: !!hasStructured,
-          resultPreview: String(hasStructured ? mathText : cleanText(mathText)).slice(0, 200),
-        });
-        // #endregion
         return { text: hasStructured ? mathText : cleanText(mathText) };
       }
       if (hasStructured) {
         var structuredText = extractFragmentText(fragment, rawText);
-        // #region debug-point D:structured-branch
-        reportSelectionCopyDebug('D', 'copy-cleaner.user.js:1086', 'selection structured branch', {
-          changed: structuredText !== rawText,
-          resultPreview: String(structuredText || '').slice(0, 200),
-        });
-        // #endregion
         return structuredText !== rawText ? { text: structuredText } : null;
       }
     }
 
     if (!rawText) return null;
     var cleanedText = cleanText(rawText);
-    // #region debug-point E:plain-branch
-    reportSelectionCopyDebug('E', 'copy-cleaner.user.js:1090', 'selection plain branch', {
-      changed: cleanedText !== rawText,
-      resultPreview: String(cleanedText || '').slice(0, 200),
-    });
-    // #endregion
     return cleanedText !== rawText
       ? { text: cleanedText }
       : null;
@@ -1432,12 +1495,11 @@
           if (shouldBypassClipboardClean) {
             return originalWriteText.call(this, text);
           }
-          var normalizedText = isAiStudioPage() && looksLikeMarkdownCopy(text)
-            ? normalizeAiStudioMarkdownForPaste(text)
-            : normalizeClipboardText(text);
+          var handler = getCurrentSiteHandler();
+          var normalizedText = handler ? handler.normalizeForPaste(text) : normalizeClipboardText(text);
           var result = originalWriteText.call(this, normalizedText);
-          if (isAiStudioPage() && looksLikeMarkdownCopy(text)) {
-            setCopyMarker('data-copy-cleaner-aistudio-copy', normalizedText);
+          if (handler) {
+            setCopyMarker(handler.markerAttr, normalizedText);
           }
           return result;
         },
@@ -1462,11 +1524,10 @@
                   if (shouldBypassClipboardClean) {
                     return new Blob([text], { type: 'text/plain' });
                   }
-                  var normalizedText = isAiStudioPage() && looksLikeMarkdownCopy(text)
-                    ? normalizeAiStudioMarkdownForPaste(text)
-                    : normalizeClipboardText(text);
-                  if (isAiStudioPage() && looksLikeMarkdownCopy(text)) {
-                    setCopyMarker('data-copy-cleaner-aistudio-copy', normalizedText);
+                  var handler = getCurrentSiteHandler();
+                  var normalizedText = handler ? handler.normalizeForPaste(text) : normalizeClipboardText(text);
+                  if (handler) {
+                    setCopyMarker(handler.markerAttr, normalizedText);
                   }
                   return new Blob([normalizedText], { type: 'text/plain' });
                 });
@@ -1489,13 +1550,6 @@
 
   function onCopy(e) {
     var payload = buildClipboardPayloadFromSelection(window.getSelection());
-    // #region debug-point F:on-copy
-    reportSelectionCopyDebug('F', 'copy-cleaner.user.js:1165', 'onCopy observed', {
-      intercepted: !!(payload && e.clipboardData),
-      hasClipboardData: !!(e && e.clipboardData),
-      payloadPreview: payload && payload.text ? String(payload.text).slice(0, 200) : '',
-    });
-    // #endregion
     if (!payload || !e.clipboardData) return;
 
     e.preventDefault();
@@ -1508,13 +1562,6 @@
     if (!isCopy) return;
 
     var payload = buildClipboardPayloadFromSelection(window.getSelection());
-    // #region debug-point G:on-keydown
-    reportSelectionCopyDebug('G', 'copy-cleaner.user.js:1178', 'onKeydown observed', {
-      intercepted: payload !== null,
-      hasClipboardWriteText: !!(navigator.clipboard && navigator.clipboard.writeText),
-      payloadPreview: payload && payload.text ? String(payload.text).slice(0, 200) : '',
-    });
-    // #endregion
     if (payload === null) return;
 
     e.preventDefault();
@@ -1527,104 +1574,23 @@
     }
   }
 
-  function onChatGptCopyButtonClick(e) {
-    if (!e.target || !e.target.closest || !/https:\/\/chatgpt\.com\//.test(String(window.location && window.location.href || ''))) {
-      return;
-    }
-    var button = e.target.closest('button[data-testid="copy-turn-action-button"]');
-    if (!button) return;
-    var turn = button.closest('[data-turn], [data-testid^="conversation-turn-"]');
-    var dataTurn = turn ? String(turn.getAttribute('data-turn') || '') : '';
-    var ariaLabel = String(button.getAttribute('aria-label') || '');
-    if (dataTurn !== 'assistant' && !/复制回复|copy response/i.test(ariaLabel)) return;
-    if (!turn || !turn.querySelector) return;
+  function onSiteCopyButtonClick(e) {
+    var handler = getCurrentSiteHandler();
+    if (!handler || !handler.findCopyTarget) return;
+    var target = handler.findCopyTarget(e);
+    if (!target) return;
 
-    e.preventDefault();
-    e.stopImmediatePropagation();
-
-    function finalizeCopy(attempt) {
-      var contentRoot = turn.querySelector('[data-message-author-role="assistant"] .markdown')
-        || turn.querySelector('[data-message-author-role="assistant"]')
-        || turn;
-      if (!contentRoot || !contentRoot.cloneNode) return;
-      var text = buildStructuredCopyText(contentRoot, turn);
-      var hasPendingDecoratedLinks = !!turn.querySelector('a.decorated-link:not([href])');
-      if (hasPendingDecoratedLinks && attempt < 5 && !/\]\([^)]+\)/.test(text)) {
-        setTimeout(function () {
-          finalizeCopy(attempt + 1);
-        }, 50);
-        return;
-      }
-      if (!text) return;
-      copyStructuredContentRoot(contentRoot, turn, 'data-copy-cleaner-chatgpt-copy');
+    if (target.type !== 'clipboard-readwrite') {
+      e.preventDefault();
+      e.stopImmediatePropagation();
     }
 
-    setTimeout(function () {
-      finalizeCopy(0);
-    }, 0);
-  }
-
-  function onTikaCopyButtonClick(e) {
-    if (!e.target || !e.target.closest || !/https:\/\/tika\.byteintl\.net\//.test(String(window.location && window.location.href || ''))) {
-      return;
+    if (handler.performCopy) {
+      handler.performCopy(target, handler.markerAttr);
     }
-    var button = e.target.closest('button');
-    if (!button || !button.querySelector || !button.querySelector('.i-icon-copy')) return;
-    var toolbar = button.closest('.pt-2.flex.items-center');
-    if (!toolbar) return;
-    var answerRoot = toolbar.closest('.chat-answer-area');
-    if (!answerRoot) return;
-
-    e.preventDefault();
-    e.stopImmediatePropagation();
-
-    setTimeout(function () {
-      copyTextWithMarker(
-        normalizeTikaCopiedMarkdown(buildStructuredCopyText(answerRoot, answerRoot)),
-        'data-copy-cleaner-tika-copy'
-      );
-    }, 0);
-  }
-
-  function onGeminiCopyButtonClick(e) {
-    if (!e.target || !e.target.closest || !/https:\/\/gemini\.google\.com\//.test(String(window.location && window.location.href || ''))) {
-      return;
-    }
-    var button = e.target.closest('button[data-test-id="copy-button"][aria-label="Copy"]');
-    if (!button) return;
-    var responseRoot = button.closest('response-container, .response-container');
-    if (!responseRoot) return;
-    var contentRoot = responseRoot.querySelector('structured-content-container .markdown')
-      || responseRoot.querySelector('message-content .markdown')
-      || responseRoot.querySelector('.response-content .markdown')
-      || responseRoot.querySelector('.markdown');
-    if (!contentRoot) return;
-
-    e.preventDefault();
-    e.stopImmediatePropagation();
-
-    setTimeout(function () {
-      copyStructuredContentRoot(contentRoot, responseRoot, 'data-copy-cleaner-gemini-copy');
-    }, 0);
-  }
-
-  function onAiStudioCopyMarkdownClick(e) {
-    if (!e.target || !e.target.closest || !/https:\/\/aistudio\.google\.com\//.test(String(window.location && window.location.href || ''))) {
-      return;
-    }
-    var menuItem = e.target.closest('[role="menuitem"]');
-    var label = String(menuItem && (menuItem.innerText || menuItem.textContent || '') || '').trim();
-    if (!menuItem || !/copy as markdown/i.test(label)) return;
-
-    setTimeout(function () {
-      copyAiStudioMarkdownFromClipboard('data-copy-cleaner-aistudio-copy');
-    }, 80);
   }
 
   window.addEventListener('copy', onCopy, true);
   window.addEventListener('keydown', onKeydown, true);
-  window.addEventListener('click', onChatGptCopyButtonClick, true);
-  window.addEventListener('click', onGeminiCopyButtonClick, true);
-  window.addEventListener('click', onTikaCopyButtonClick, true);
-  window.addEventListener('click', onAiStudioCopyMarkdownClick, true);
+  window.addEventListener('click', onSiteCopyButtonClick, true);
 })();

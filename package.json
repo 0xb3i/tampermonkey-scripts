@@ -5,12 +5,12 @@
   "private": true,
   "scripts": {
     "test": "node --test ./tests/*.test.cjs",
-    "copycleaner:aistudio": "node automation/copy-cleaner-aistudio-runner.js",
-    "copycleaner:chatgpt": "node automation/copy-cleaner-chatgpt-runner.js",
-    "copycleaner:gemini": "node automation/copy-cleaner-gemini-runner.js",
-    "copycleaner:realtest": "node automation/copy-cleaner-chatgpt-runner.js --case chatgpt-markdown-fixture-page",
-    "copycleaner:prompttest": "node automation/copy-cleaner-chatgpt-runner.js --case chatgpt-basic-cleanup",
-    "copycleaner:tika": "node automation/copy-cleaner-tika-runner.js",
+    "copycleaner:aistudio": "node automation/copy-cleaner-runner.js --site aistudio",
+    "copycleaner:chatgpt": "node automation/copy-cleaner-runner.js --site chatgpt",
+    "copycleaner:gemini": "node automation/copy-cleaner-runner.js --site gemini",
+    "copycleaner:realtest": "node automation/copy-cleaner-runner.js --site chatgpt --case chatgpt-markdown-fixture-page",
+    "copycleaner:prompttest": "node automation/copy-cleaner-runner.js --site chatgpt --case chatgpt-basic-cleanup",
+    "copycleaner:tika": "node automation/copy-cleaner-runner.js --site tika",
     "feishu:realtest": "node automation/feishu-real-test-runner.js",
     "tampermonkey:sync": "node bin/tampermonkey-sync-cli.cjs"
   },
@@ -18,7 +18,7 @@
     "tampermonkey-sync": "./bin/tampermonkey-sync-cli.cjs"
   },
   "devDependencies": {
-    "@playwright/test": "^1.59.1"
+    "@playwright/test": "^1.60.0-alpha-2026-05-01"
   },
   "main": "index.js",
   "directories": {

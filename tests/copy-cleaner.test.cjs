@@ -323,17 +323,21 @@ test('copy cleaner preserves code-fence blank lines while compacting AI Studio m
   );
 });
 
-test('copy cleaner removes old debug globals but keeps dual copy entry points', () => {
+test('copy cleaner removes old debug globals but keeps unified copy entry points', () => {
   const source = fs.readFileSync(path.join(__dirname, '../userscripts/copy-cleaner.user.js'), 'utf8');
 
   assert.doesNotMatch(source, /__copyCleanerCleanText/);
   assert.doesNotMatch(source, /__copyCleanerSplitByLatex/);
   assert.doesNotMatch(source, /__copyCleanerExtractLatex/);
   assert.doesNotMatch(source, /__tampermonkeyScriptDebugExports/);
+  assert.doesNotMatch(source, /reportSelectionCopyDebug/);
+  assert.doesNotMatch(source, /isAiStudioPage/);
+  assert.doesNotMatch(source, /onChatGptCopyButtonClick|onGeminiCopyButtonClick|onTikaCopyButtonClick|onAiStudioCopyMarkdownClick/);
   assert.match(source, /window\.addEventListener\('copy', onCopy, true\)/);
   assert.match(source, /window\.addEventListener\('keydown', onKeydown, true\)/);
-  assert.match(source, /window\.addEventListener\('click', onChatGptCopyButtonClick, true\)/);
-  assert.match(source, /window\.addEventListener\('click', onTikaCopyButtonClick, true\)/);
+  assert.match(source, /window\.addEventListener\('click', onSiteCopyButtonClick, true\)/);
+  assert.match(source, /SITE_HANDLERS/);
+  assert.match(source, /getCurrentSiteHandler/);
   assert.match(source, /data-copy-cleaner-tika-copy/);
 });
 
