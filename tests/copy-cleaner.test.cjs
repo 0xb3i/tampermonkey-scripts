@@ -217,6 +217,76 @@ test('copy cleaner selection payload normalizes nested unordered lists for Feish
   );
 });
 
+test('copy cleaner keeps nested lists at four-space indentation across mixed list types', () => {
+  const { buildClipboardPayloadFromSelection } = loadCopyCleanerExports();
+  const fragment = createFragment([
+    createElement('DIV', [
+      createElement('P', [createTextNode('无序列表：')]),
+      createElement('UL', [
+        createElement('LI', [
+          createElement('P', [createTextNode('项目一')]),
+        ]),
+        createElement('LI', [
+          createElement('P', [createTextNode('项目二')]),
+          createElement('UL', [
+            createElement('LI', [
+              createElement('P', [createTextNode('子项目 2.1')]),
+            ]),
+          ]),
+        ]),
+      ]),
+      createElement('P', [createTextNode('有序列表：')]),
+      createElement('OL', [
+        createElement('LI', [
+          createElement('P', [createTextNode('第一点')]),
+        ]),
+        createElement('LI', [
+          createElement('P', [createTextNode('第二点')]),
+          createElement('OL', [
+            createElement('LI', [
+              createElement('P', [createTextNode('子点 2.1')]),
+            ]),
+            createElement('LI', [
+              createElement('P', [createTextNode('子点 2.2')]),
+            ]),
+          ]),
+        ]),
+      ]),
+    ]),
+  ]);
+  const payload = buildClipboardPayloadFromSelection({
+    isCollapsed: false,
+    rangeCount: 1,
+    toString: function () {
+      return '无序列表：项目一项目二子项目 2.1有序列表：第一点第二点子点 2.1子点 2.2';
+    },
+    getRangeAt: function () {
+      return {
+        startContainer: createTextNode('无序列表：'),
+        endContainer: createTextNode('子点 2.2'),
+        cloneRange: function () { return this; },
+        cloneContents: function () { return fragment; },
+      };
+    },
+  });
+
+  assert.ok(payload);
+  assert.equal(
+    payload.text,
+    [
+      '无序列表：',
+      '- 项目一',
+      '- 项目二',
+      '    - 子项目 2.1',
+      '有序列表：',
+      '1. 第一点',
+      '2. 第二点',
+      '    1. 子点 2.1',
+      '    2. 子点 2.2',
+    ].join('\n')
+  );
+});
+
 test('copy cleaner keeps indentation for plain code copied through clipboard text path', () => {
   const { normalizeClipboardText } = loadCopyCleanerExports();
   const code = 'def foo():\n    x = 1\n\n    if x:\n        print(x)';
@@ -735,6 +805,56 @@ test('copy cleaner uses Feishu-friendly indentation for nested ordered lists', (
       '    1. 子点 2.1',
       '    2. 子点 2.2',
       '3. 第三点',
+    ].join('\n')
+  );
+});
+
+test('copy cleaner preserves nested list depth when site DOM wraps nested lists inside spans', () => {
+  const { serializeStructuredFragment } = loadCopyCleanerExports();
+  const fragment = createFragment([
+    createElement('DIV', [
+      createElement('UL', [
+        createElement('LI', [
+          createElement('SPAN', [
+            createTextNode('第二项\n'),
+            createElement('UL', [
+              createElement('LI', [
+                createElement('SPAN', [createTextNode('嵌套子项')]),
+              ]),
+              createElement('LI', [
+                createElement('SPAN', [createTextNode('另一个嵌套子项')]),
+              ]),
+            ]),
+          ]),
+        ]),
+      ]),
+      createElement('OL', [
+        createElement('LI', [
+          createElement('SPAN', [
+            createTextNode('第二步\n'),
+            createElement('OL', [
+              createElement('LI', [
+                createElement('SPAN', [createTextNode('子步骤一')]),
+              ]),
+              createElement('LI', [
+                createElement('SPAN', [createTextNode('子步骤二')]),
+              ]),
+            ]),
+          ]),
+        ]),
+      ]),
+    ]),
+  ]);
+
+  assert.equal(
+    serializeStructuredFragment(fragment),
+    [
+      '- 第二项',
+      '    - 嵌套子项',
+      '    - 另一个嵌套子项',
+      '1. 第二步',
+      '    1. 子步骤一',
+      '    2. 子步骤二',
     ].join('\n')
   );
 });

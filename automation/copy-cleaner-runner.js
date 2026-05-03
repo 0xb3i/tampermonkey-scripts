@@ -24,11 +24,74 @@ const {
 
 const DEFAULT_SCRIPT_PATH = resolve(__dirname, '../userscripts/copy-cleaner.user.js');
 
+function findExistingPageForUrl(context, targetUrl, currentPage) {
+  var expectedUrl = String(targetUrl || '');
+  var pages = context && typeof context.pages === 'function' ? context.pages() : [];
+  return pages.find(function (item) {
+    return item !== currentPage && String(item.url && item.url() || '') === expectedUrl;
+  }) || null;
+}
+
 async function defaultNavigateToPage(context, page, targetUrl) {
+  await page.bringToFront().catch(function () {});
   await navigateCurrentTab(page, targetUrl);
   await ensureClipboardPermission(context, new URL(targetUrl).origin);
   await page.reload({ waitUntil: 'domcontentloaded' });
   return page;
+}
+
+async function navigateExistingPageOrCurrent(context, page, targetUrl) {
+  var targetPage = findExistingPageForUrl(context, targetUrl, page) || page;
+  await targetPage.bringToFront().catch(function () {});
+  if (String(targetPage.url && targetPage.url() || '') !== String(targetUrl || '')) {
+    await navigateCurrentTab(targetPage, targetUrl);
+  }
+  await ensureClipboardPermission(context, new URL(targetUrl).origin);
+  await targetPage.reload({ waitUntil: 'domcontentloaded' });
+  return targetPage;
+}
+
+async function ensurePageFocusForClipboard(page) {
+  await page.bringToFront().catch(function () {});
+
+  async function readFocusState() {
+    return page.evaluate(function () {
+      try {
+        if (typeof window.focus === 'function') window.focus();
+      } catch (error) {}
+      return {
+        active: !!(document && document.hasFocus && document.hasFocus()),
+        visibility: String(document && document.visibilityState || ''),
+      };
+    }).catch(function () {
+      return { active: false, visibility: '' };
+    });
+  }
+
+  var state = await readFocusState();
+  if (state.active && state.visibility === 'visible') {
+    return state;
+  }
+
+  await page.locator('body').click({
+    force: true,
+    position: { x: 8, y: 8 },
+  }).catch(function () {});
+  return readFocusState();
+}
+
+async function readClipboardTextWithFocus(page) {
+  try {
+    return await readClipboardText(page);
+  } catch (error) {
+    var message = String(error && error.message || error || '');
+    if (!/notallowederror|not focused/i.test(message)) {
+      throw error;
+    }
+  }
+
+  await ensurePageFocusForClipboard(page);
+  return readClipboardText(page);
 }
 
 var ADAPTERS = {
@@ -40,11 +103,11 @@ var ADAPTERS = {
     prepareClipboard: prepareAiStudioClipboard,
     navigateToPage: navigateAiStudioPage,
     postClickWait: 1000,
-      retryClick: true,
+    retryClick: true,
   },
   chatgpt: {
     pageMarkerAttr: 'data-copy-cleaner-chatgpt-copy',
-    requirePageMarker: false,
+    requirePageMarker: true,
     waitForReply: waitForChatGPTReply,
     clickCopy: clickChatGPTCopy,
     prepareClipboard: null,
@@ -64,11 +127,11 @@ var ADAPTERS = {
   },
   tika: {
     pageMarkerAttr: 'data-copy-cleaner-tika-copy',
-    requirePageMarker: false,
+    requirePageMarker: true,
     waitForReply: waitForTikaReply,
     clickCopy: clickTikaCopy,
     prepareClipboard: null,
-    navigateToPage: defaultNavigateToPage,
+    navigateToPage: navigateExistingPageOrCurrent,
     postClickWait: 300,
     retryClick: false,
   },
@@ -103,24 +166,44 @@ async function waitForAiStudioReply(page) {
 }
 
 async function clickAiStudioCopy(page) {
+  await ensurePageFocusForClipboard(page);
   var target = page.locator('ms-chat-turn').filter({ hasText: '这是一个包含常用 Markdown 语法的示例文本' }).first();
   await target.locator('button[aria-label="Open options"]').click({ force: true });
   await page.waitForTimeout(800);
   var menuItem = page.locator('[role="menuitem"]').filter({ hasText: /Copy as markdown/i });
   await menuItem.waitFor({ state: 'visible', timeout: 5000 });
+  await ensurePageFocusForClipboard(page);
   await menuItem.click({ force: true });
   return { action: 'copy-as-markdown' };
 }
 
 async function prepareAiStudioClipboard(page) {
-  await page.evaluate(async function () {
-    document.documentElement.removeAttribute('data-copy-cleaner-aistudio-copy');
-    var selection = window.getSelection && window.getSelection();
-    if (selection) selection.removeAllRanges();
-    if (navigator.clipboard && navigator.clipboard.writeText) {
-      await navigator.clipboard.writeText('__copycleaner_aistudio_sentinel__');
-    }
-  });
+  async function writeSentinel() {
+    return page.evaluate(async function (sentinel) {
+      document.documentElement.removeAttribute('data-copy-cleaner-aistudio-copy');
+      var selection = window.getSelection && window.getSelection();
+      if (selection) selection.removeAllRanges();
+      if (!(navigator.clipboard && navigator.clipboard.writeText)) {
+        return { ok: false, reason: 'clipboard-write-unavailable' };
+      }
+      try {
+        await navigator.clipboard.writeText(sentinel);
+        return { ok: true };
+      } catch (error) {
+        return { ok: false, reason: String(error && error.message || error || 'clipboard-write-failed') };
+      }
+    }, '__copycleaner_aistudio_sentinel__');
+  }
+
+  await ensurePageFocusForClipboard(page);
+  var result = await writeSentinel();
+  if (result && result.ok) return;
+
+  await ensurePageFocusForClipboard(page);
+  result = await writeSentinel();
+  if (result && result.ok) return;
+
+  throw new Error('AI Studio clipboard preparation failed: ' + String(result && result.reason || 'unknown'));
 }
 
 async function waitForChatGPTReply(page) {
@@ -177,7 +260,14 @@ async function clickChatGPTCopy(page) {
   if (!target) {
     throw new Error('No ChatGPT copy button found.');
   }
-  await buttons.nth(target.index).click({ force: true });
+  await page.evaluate(function (targetIndex) {
+    var nodes = Array.from(document.querySelectorAll('button[data-testid="copy-turn-action-button"]'));
+    var targetButton = nodes[targetIndex];
+    if (!targetButton) {
+      throw new Error('ChatGPT copy button disappeared before click.');
+    }
+    targetButton.click();
+  }, target.index);
   return target;
 }
 
@@ -284,7 +374,7 @@ async function validateCopy(page, site, options) {
     var pageMarkerValue = String(await page.evaluate(function (attr) {
       return document.documentElement.getAttribute(attr) || '';
     }, adapter.pageMarkerAttr) || '');
-    var clipboardValue = String(await readClipboardText(page) || '');
+    var clipboardValue = String(await readClipboardTextWithFocus(page) || '');
     var waitSatisfied = !!(pageMarkerValue || (clipboardValue && clipboardValue !== '__copycleaner_aistudio_sentinel__'));
     if (!waitSatisfied) {
       clickedTarget = await adapter.clickCopy(page);
@@ -293,7 +383,7 @@ async function validateCopy(page, site, options) {
     await page.waitForTimeout(200);
   }
 
-  var rawClipboardText = String(await readClipboardText(page) || '');
+  var rawClipboardText = String(await readClipboardTextWithFocus(page) || '');
   var rawPageMarker = String(await page.evaluate(function (attr) {
     return document.documentElement.getAttribute(attr) || '';
   }, adapter.pageMarkerAttr) || '');
@@ -402,6 +492,11 @@ async function runCopyCleanerRealTest(options) {
 
 module.exports = {
   ADAPTERS: ADAPTERS,
+  defaultNavigateToPage: defaultNavigateToPage,
+  ensurePageFocusForClipboard: ensurePageFocusForClipboard,
+  findExistingPageForUrl: findExistingPageForUrl,
+  navigateExistingPageOrCurrent: navigateExistingPageOrCurrent,
+  readClipboardTextWithFocus: readClipboardTextWithFocus,
   parseCliArgs: parseCliArgs,
   runCopyCleanerRealTest: runCopyCleanerRealTest,
   validateCopy: validateCopy,

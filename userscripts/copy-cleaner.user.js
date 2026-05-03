@@ -1171,7 +1171,7 @@
       appendStructuredLineBreak(state);
       var indent = '';
       if (state.listDepth > 1) {
-        indent = new Array(getNestedListIndent(node) + 1).join(' ');
+        indent = new Array((state.listDepth - 1) * 4 + 1).join(' ');
       }
       if (indent) state.value += indent;
       var itemIndex = 0;
@@ -1457,20 +1457,6 @@
 
   function hasStructuredFragmentContent(fragment) {
     return !!(fragment && fragment.querySelector && fragment.querySelector('*'));
-  }
-
-  function getNestedListIndent(node) {
-    var indent = 0;
-    var currentList = node && node.parentElement;
-    while (currentList && (currentList.tagName === 'UL' || currentList.tagName === 'OL')) {
-      var parentItem = currentList.parentElement;
-      if (!parentItem || parentItem.tagName !== 'LI') break;
-      var containerList = parentItem.parentElement;
-      if (!containerList || (containerList.tagName !== 'UL' && containerList.tagName !== 'OL')) break;
-      indent += containerList.tagName === 'OL' ? 4 : 2;
-      currentList = containerList;
-    }
-    return indent;
   }
 
   function extractFragmentText(fragment, baseText) {

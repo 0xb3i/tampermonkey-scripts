@@ -7,6 +7,12 @@ const {
   listRealTestCases,
 } = require('../automation/copy-cleaner-cases.cjs');
 const {
+  ADAPTERS,
+  defaultNavigateToPage,
+  ensurePageFocusForClipboard,
+  findExistingPageForUrl,
+  navigateExistingPageOrCurrent,
+  readClipboardTextWithFocus,
   parseCliArgs,
   runCopyCleanerRealTest,
 } = require('../automation/copy-cleaner-runner.js');
@@ -72,6 +78,199 @@ test('getRealTestCase throws for unknown case', () => {
 
 test('runner exports the real test entry point', () => {
   assert.equal(typeof runCopyCleanerRealTest, 'function');
+});
+
+test('structured intercept site adapters require page markers during verification', () => {
+  assert.equal(ADAPTERS.chatgpt.requirePageMarker, true);
+  assert.equal(ADAPTERS.tika.requirePageMarker, true);
+});
+
+test('findExistingPageForUrl prefers an already-open matching target page', () => {
+  const currentPage = {
+    url: function () {
+      return 'chrome-extension://dhdgffkkebhmkfjojejmpbldmpobfkfo/options.html#nav=dashboard';
+    },
+  };
+  const targetPage = {
+    url: function () {
+      return 'https://tika.byteintl.net/search?conversation_id=1077720878852';
+    },
+  };
+  const context = {
+    pages: function () {
+      return [currentPage, targetPage];
+    },
+  };
+
+  assert.equal(
+    findExistingPageForUrl(context, 'https://tika.byteintl.net/search?conversation_id=1077720878852', currentPage),
+    targetPage
+  );
+});
+
+test('defaultNavigateToPage always navigates the provided page for general sites', async () => {
+  const calls = [];
+  const currentPage = {
+    url: function () {
+      return 'chrome-extension://dhdgffkkebhmkfjojejmpbldmpobfkfo/options.html#nav=dashboard';
+    },
+    bringToFront: async function () {
+      calls.push('current:bringToFront');
+    },
+    goto: async function (url) {
+      calls.push(['goto', url]);
+    },
+    waitForLoadState: async function (state) {
+      calls.push(['waitForLoadState', state]);
+    },
+    reload: async function () {
+      calls.push('current:reload');
+    },
+  };
+  const context = {
+    grantPermissions: async function (permissions, options) {
+      calls.push(['grantPermissions', permissions, options]);
+    },
+  };
+
+  const result = await defaultNavigateToPage(context, currentPage, 'https://chatgpt.com/c/69f45156-a908-83e8-a147-f694e7d9c109');
+
+  assert.equal(result, currentPage);
+  assert.deepEqual(calls, [
+    'current:bringToFront',
+    ['goto', 'https://chatgpt.com/c/69f45156-a908-83e8-a147-f694e7d9c109'],
+    ['waitForLoadState', 'domcontentloaded'],
+    ['grantPermissions', ['clipboard-read', 'clipboard-write'], { origin: 'https://chatgpt.com' }],
+    'current:reload',
+  ]);
+});
+
+test('navigateExistingPageOrCurrent reuses an existing target page for Tika-style fixed conversations', async () => {
+  const calls = [];
+  const currentPage = {
+    url: function () {
+      return 'chrome-extension://dhdgffkkebhmkfjojejmpbldmpobfkfo/options.html#nav=dashboard';
+    },
+    bringToFront: async function () {
+      calls.push('current:bringToFront');
+    },
+    reload: async function () {
+      calls.push('current:reload');
+    },
+  };
+  const targetPage = {
+    url: function () {
+      return 'https://tika.byteintl.net/search?conversation_id=1077720878852';
+    },
+    bringToFront: async function () {
+      calls.push('target:bringToFront');
+    },
+    reload: async function () {
+      calls.push('target:reload');
+    },
+    context: function () {
+      return context;
+    },
+  };
+  const context = {
+    pages: function () {
+      return [currentPage, targetPage];
+    },
+    grantPermissions: async function (permissions, options) {
+      calls.push(['grantPermissions', permissions, options]);
+    },
+  };
+
+  const result = await navigateExistingPageOrCurrent(context, currentPage, 'https://tika.byteintl.net/search?conversation_id=1077720878852');
+
+  assert.equal(result, targetPage);
+  assert.deepEqual(calls, [
+    'target:bringToFront',
+    ['grantPermissions', ['clipboard-read', 'clipboard-write'], { origin: 'https://tika.byteintl.net' }],
+    'target:reload',
+  ]);
+});
+
+test('ensurePageFocusForClipboard retries body click when the page is not focused yet', async () => {
+  const calls = [];
+  let evaluateCount = 0;
+  const page = {
+    bringToFront: async function () {
+      calls.push('bringToFront');
+    },
+    evaluate: async function () {
+      evaluateCount += 1;
+      calls.push('evaluate:' + evaluateCount);
+      if (evaluateCount === 1) {
+        return { active: false, visibility: 'hidden' };
+      }
+      return { active: true, visibility: 'visible' };
+    },
+    locator: function (selector) {
+      calls.push('locator:' + selector);
+      return {
+        click: async function () {
+          calls.push('click:' + selector);
+        },
+      };
+    },
+  };
+
+  const result = await ensurePageFocusForClipboard(page);
+
+  assert.deepEqual(result, { active: true, visibility: 'visible' });
+  assert.deepEqual(calls, [
+    'bringToFront',
+    'evaluate:1',
+    'locator:body',
+    'click:body',
+    'evaluate:2',
+  ]);
+});
+
+test('readClipboardTextWithFocus retries clipboard read after recovering focus', async () => {
+  const calls = [];
+  let evaluateCount = 0;
+  const page = {
+    bringToFront: async function () {
+      calls.push('bringToFront');
+    },
+    locator: function (selector) {
+      calls.push('locator:' + selector);
+      return {
+        click: async function () {
+          calls.push('click:' + selector);
+        },
+      };
+    },
+    evaluate: async function () {
+      evaluateCount += 1;
+      calls.push('evaluate:' + evaluateCount);
+      if (evaluateCount === 1) {
+        throw new Error('NotAllowedError: Document is not focused');
+      }
+      if (evaluateCount === 2) {
+        return { active: false, visibility: 'hidden' };
+      }
+      if (evaluateCount === 3) {
+        return { active: true, visibility: 'visible' };
+      }
+      return 'clipboard text';
+    },
+  };
+
+  const result = await readClipboardTextWithFocus(page);
+
+  assert.equal(result, 'clipboard text');
+  assert.deepEqual(calls, [
+    'evaluate:1',
+    'bringToFront',
+    'evaluate:2',
+    'locator:body',
+    'click:body',
+    'evaluate:3',
+    'evaluate:4',
+  ]);
 });
 
 test('parseCliArgs keeps boolean flags and key-value pairs', () => {
