@@ -206,8 +206,75 @@
     XMLHttpRequest.prototype.send = _originalXHRSend;
   });
 
+  function scoreEditableRootCandidate(node) {
+    if (!node || node.nodeType !== 1) return -Infinity;
+    var rect = typeof node.getBoundingClientRect === 'function'
+      ? node.getBoundingClientRect()
+      : { width: 0, height: 0 };
+    var textLength = summarizeComponentText(node.innerText || node.textContent || '', 4000).length;
+    var richNodeCount = node.querySelectorAll('img, table, blockquote, pre, hr, [data-block-type], .callout-container, .callout-block, [class*="code-block"], [class*="whiteboard"]').length;
+    var imageCount = node.querySelectorAll('img, [data-block-type="image"]').length;
+    var tableCount = node.querySelectorAll('table, [data-block-type="table"]').length;
+    var blockCount = node.querySelectorAll('[data-block-type], p, li, pre, table, blockquote').length;
+    var area = Math.max(rect.width || 0, 0) * Math.max(rect.height || 0, 0);
+    var score = 0;
+
+    if (node.getAttribute('data-content-editable-root') === 'true') score += 8;
+    score += Math.min(textLength, 4000) / 50;
+    score += Math.min(richNodeCount, 30) * 3;
+    score += Math.min(imageCount, 10) * 4;
+    score += Math.min(tableCount, 10) * 4;
+    score += Math.min(blockCount, 40) * 1.5;
+    score += Math.min(area, 1600000) / 20000;
+    return score;
+  }
+
   function getContentRootElement() {
-    return document.querySelector(CONTENT_ROOT_SELECTOR);
+    var nodes = Array.prototype.slice.call(document.querySelectorAll(EDITABLE_SELECTOR), 0, 24);
+    if (!nodes.length) return null;
+    var bestNode = nodes[0];
+    var bestScore = -Infinity;
+    nodes.forEach(function (node) {
+      var score = scoreEditableRootCandidate(node);
+      if (score > bestScore) {
+        bestScore = score;
+        bestNode = node;
+      }
+    });
+    return bestNode || null;
+  }
+
+  function getValidationSurfaceElement() {
+    var candidates = [];
+
+    function pushCandidate(node) {
+      if (!node || node.nodeType !== 1 || candidates.indexOf(node) !== -1) return;
+      candidates.push(node);
+    }
+
+    pushCandidate(getContentRootElement());
+    pushCandidate(document.querySelector('main'));
+    pushCandidate(document.querySelector('[role="main"]'));
+    Array.prototype.slice.call(document.querySelectorAll('[class*="wiki"], [class*="doc"], [class*="editor"], [data-page-id], [data-block-type]'), 0, 24).forEach(function (node) {
+      pushCandidate(node);
+    });
+    pushCandidate(document.body);
+
+    if (!candidates.length) return null;
+
+    var bestNode = candidates[0];
+    var bestScore = -Infinity;
+    candidates.forEach(function (node) {
+      var score = scoreEditableRootCandidate(node);
+      if (node === document.body) score -= 8;
+      if (node === getContentRootElement()) score += 4;
+      if (score > bestScore) {
+        bestScore = score;
+        bestNode = node;
+      }
+    });
+
+    return bestNode || document.body || null;
   }
 
   function getReactFiberNode(el) {
@@ -226,6 +293,8 @@
       candidates.push(node);
     }
 
+    pushCandidate(getContentRootElement());
+
     pushCandidate(document.activeElement);
 
     var selection = null;
@@ -233,8 +302,6 @@
       selection = window.getSelection ? window.getSelection() : null;
     } catch (error) {}
     pushCandidate(selection && selection.anchorNode ? (selection.anchorNode.nodeType === 1 ? selection.anchorNode : selection.anchorNode.parentElement) : null);
-
-    pushCandidate(getContentRootElement());
 
     Array.prototype.slice.call(document.querySelectorAll(EDITABLE_SELECTOR), 0, 12).forEach(function (node) {
       pushCandidate(node);
@@ -519,6 +586,123 @@
     snapshot.storedComponentCount = snapshot.components.length;
   }
 
+  function listSemanticComponentsByType(snapshot, type) {
+    if (!snapshot || !Array.isArray(snapshot.components)) return [];
+    return snapshot.components.filter(function (component) {
+      return component && component.type === type;
+    });
+  }
+
+  function scoreSemanticComponent(component) {
+    if (!component) return 0;
+    var score = 0;
+    if (component.rendered === true) score += 2;
+    if (component.textSample) score += Math.min(String(component.textSample).length, 80) / 20;
+    if (Number(component.width || 0) > 0) score += 1;
+    if (Number(component.height || 0) > 0) score += 1;
+    if (Number(component.rowCount || 0) > 0) score += 1;
+    if (Number(component.colCount || 0) > 0) score += 1;
+    if (Array.isArray(component.cellTexts) && component.cellTexts.length) {
+      score += Math.min(component.cellTexts.length, 4);
+    }
+    return score;
+  }
+
+  function scoreSemanticComponentList(components) {
+    return (components || []).reduce(function (total, component) {
+      return total + scoreSemanticComponent(component);
+    }, 0);
+  }
+
+  function chooseSemanticComponentsForType(primaryComponents, fallbackComponents) {
+    if ((fallbackComponents || []).length > (primaryComponents || []).length) {
+      return fallbackComponents || [];
+    }
+    if ((primaryComponents || []).length > (fallbackComponents || []).length) {
+      return primaryComponents || [];
+    }
+    return scoreSemanticComponentList(fallbackComponents || []) > scoreSemanticComponentList(primaryComponents || [])
+      ? (fallbackComponents || [])
+      : (primaryComponents || []);
+  }
+
+  function mergeSemanticSnapshots(primarySnapshot, fallbackSnapshot) {
+    var primary = primarySnapshot || createSemanticSnapshot();
+    var fallback = fallbackSnapshot || createSemanticSnapshot();
+    var result = createSemanticSnapshot();
+    var typeMap = {};
+
+    Object.keys(primary.componentCounts || {}).forEach(function (type) {
+      typeMap[type] = true;
+    });
+    Object.keys(fallback.componentCounts || {}).forEach(function (type) {
+      typeMap[type] = true;
+    });
+    (primary.components || []).forEach(function (component) {
+      if (component && component.type) typeMap[component.type] = true;
+    });
+    (fallback.components || []).forEach(function (component) {
+      if (component && component.type) typeMap[component.type] = true;
+    });
+
+    var storedComponents = [];
+    Object.keys(typeMap).sort().forEach(function (type) {
+      var primaryComponents = listSemanticComponentsByType(primary, type);
+      var fallbackComponents = listSemanticComponentsByType(fallback, type);
+      var resolvedCount = Math.max(
+        Number(primary.componentCounts && primary.componentCounts[type] || 0),
+        Number(fallback.componentCounts && fallback.componentCounts[type] || 0),
+        primaryComponents.length,
+        fallbackComponents.length
+      );
+      if (resolvedCount <= 0) return;
+      result.componentCounts[type] = resolvedCount;
+      result.totalComponentCount += resolvedCount;
+
+      chooseSemanticComponentsForType(primaryComponents, fallbackComponents).forEach(function (component) {
+        if (storedComponents.length >= 40) return;
+        storedComponents.push(component);
+      });
+    });
+
+    result.components = storedComponents;
+    result.storedComponentCount = storedComponents.length;
+    return result;
+  }
+
+  function collectUniqueElements(root, selectors, limit) {
+    var seen = [];
+    var nodes = [];
+    if (!root || typeof root.querySelectorAll !== 'function') return nodes;
+    (selectors || []).forEach(function (selector) {
+      if (nodes.length >= (limit || 12)) return;
+      try {
+        Array.prototype.slice.call(root.querySelectorAll(selector), 0, limit || 12).forEach(function (node) {
+          if (!node || seen.indexOf(node) !== -1 || nodes.length >= (limit || 12)) return;
+          seen.push(node);
+          nodes.push(node);
+        });
+      } catch (error) {}
+    });
+    return nodes;
+  }
+
+  function collectLiteralPlaceholderElements(root, labels, limit) {
+    var results = [];
+    if (!root || typeof root.querySelectorAll !== 'function') return results;
+    Array.prototype.slice.call(root.querySelectorAll('*'), 0, 240).forEach(function (node) {
+      if (results.length >= (limit || 8)) return;
+      var text = summarizeComponentText(node.textContent || '', 40);
+      if (!text) return;
+      if ((labels || []).some(function (label) {
+        return text === label || text === '[' + label + ']';
+      })) {
+        results.push(node);
+      }
+    });
+    return results;
+  }
+
   function collectSemanticSnapshotFromStructService() {
     var summary = createSemanticSnapshot();
     var ss = getStructService();
@@ -633,10 +817,14 @@
 
   function collectSemanticSnapshotFromDomFallback() {
     var summary = createSemanticSnapshot();
-    var root = getContentRootElement() || document.querySelector(EDITABLE_SELECTOR);
+    var root = getValidationSurfaceElement() || getContentRootElement() || document.querySelector(EDITABLE_SELECTOR) || document.body;
     if (!root) return summary;
 
-    Array.prototype.slice.call(root.querySelectorAll('img'), 0, 12).forEach(function (img) {
+    collectUniqueElements(root, [
+      'figure.docx-image-block img',
+      '[data-block-type="image"] img',
+      'img',
+    ], 12).forEach(function (img) {
       pushSemanticComponent(summary, {
         type: 'image',
         rendered: Number(img.naturalWidth || img.width || 0) > 0 && Number(img.naturalHeight || img.height || 0) > 0,
@@ -646,7 +834,10 @@
       });
     });
 
-    Array.prototype.slice.call(root.querySelectorAll('table'), 0, 8).forEach(function (table) {
+    collectUniqueElements(root, [
+      '[data-block-type="table"] table',
+      'table',
+    ], 8).forEach(function (table) {
       var rows = Array.from(table.querySelectorAll('tr'));
       var firstRow = rows[0] ? Array.from(rows[0].querySelectorAll('th,td')) : [];
       var cellTexts = Array.from(table.querySelectorAll('th,td')).map(function (cell) {
@@ -662,6 +853,20 @@
       });
     });
 
+    collectUniqueElements(root, [
+      '.zoneType-calloutBlock',
+      '.callout-container',
+      '.callout-block',
+      '[class*="callout"]',
+      '[data-block-type="callout"]',
+    ], 12).forEach(function (node) {
+      pushSemanticComponent(summary, {
+        type: 'callout',
+        rendered: true,
+        textSample: summarizeComponentText(node.textContent || '', 160),
+      });
+    });
+
     Array.prototype.slice.call(root.querySelectorAll('blockquote'), 0, 8).forEach(function (node) {
       pushSemanticComponent(summary, {
         type: 'quote',
@@ -670,7 +875,12 @@
       });
     });
 
-    Array.prototype.slice.call(root.querySelectorAll('pre'), 0, 8).forEach(function (node) {
+    collectUniqueElements(root, [
+      'pre',
+      '[data-block-type="code"]',
+      '[class*="code-block"]',
+      '[class*="CodeBlock"]',
+    ], 8).forEach(function (node) {
       pushSemanticComponent(summary, {
         type: 'code_block',
         rendered: true,
@@ -697,15 +907,29 @@
       });
     });
 
+    collectUniqueElements(root, [
+      '[data-block-type="whiteboard"]',
+      '[class*="whiteboard"]',
+      '[aria-label*="白板"]',
+      '[aria-label*="whiteboard"]',
+    ], 8).concat(
+      collectLiteralPlaceholderElements(root, ['白板'], 8)
+    ).slice(0, 8).forEach(function (node) {
+      pushSemanticComponent(summary, {
+        type: 'whiteboard',
+        rendered: true,
+        textSample: summarizeComponentText(node.textContent || node.getAttribute && node.getAttribute('aria-label') || '白板', 80),
+      });
+    });
+
     return summary;
   }
 
   function collectSemanticSnapshot() {
-    var ss = getStructService();
-    if (ss && ss.rootBlock) {
-      return collectSemanticSnapshotFromStructService();
-    }
-    return collectSemanticSnapshotFromDomFallback();
+    return mergeSemanticSnapshots(
+      collectSemanticSnapshotFromStructService(),
+      collectSemanticSnapshotFromDomFallback()
+    );
   }
 
   function buildTableMatrix(snap, block, extractor, joinParts) {
@@ -2444,7 +2668,7 @@
   }
 
   function extractVisibleDomFallback() {
-    var root = getContentRootElement() || document.querySelector(EDITABLE_SELECTOR);
+    var root = getValidationSurfaceElement() || getContentRootElement() || document.querySelector(EDITABLE_SELECTOR) || document.body;
     if (!root) {
       updateLastExtractionDebug({
         mode: 'dom-fallback',
@@ -2743,6 +2967,9 @@
 
     var finalHtml = finalizeHtmlFragment(htmlParts.join('\n'));
     var finalText = normalizePlainText(mdParts.join('\n'));
+    if (!blockCount && !finalText && !finalHtml) {
+      return extractVisibleDomFallback();
+    }
     var docxRecord = buildDocxRecordPayload(ss);
     lastDocxRecord = docxRecord;
     var result = {
@@ -4461,7 +4688,7 @@
 
   function startImageInjectionObserver() {
     if (_imageInjectionObserver) return;
-    var target = document.querySelector('[data-content-editable-root="true"]') || document.body;
+    var target = getContentRootElement() || document.body;
     _imageInjectionObserver = new MutationObserver(function (mutations) {
       if (!isImageInjectionNeeded()) return;
       // Debounce: wait a tick so all blocks from a paste batch are in the DOM
@@ -4500,7 +4727,7 @@
   function injectBase64ImagesIntoEditor(orderedImageBase64List) {
     if (!orderedImageBase64List || !orderedImageBase64List.length) return 0;
 
-    var editable = document.querySelector('[data-content-editable-root="true"], [contenteditable="true"]');
+    var editable = getContentRootElement();
     if (!editable) return 0;
 
     var imageBlocks = editable.querySelectorAll('[data-block-type="image"]');
@@ -5657,7 +5884,7 @@
       getPendingPaste().then(function (pending) {
         var list = (pending && pending.orderedImageBase64List) || [];
         var count = injectBase64ImagesIntoEditor(list);
-        var editable = document.querySelector('[data-content-editable-root="true"], [contenteditable="true"]');
+        var editable = getContentRootElement();
         var imageBlocks = editable ? editable.querySelectorAll('[data-block-type="image"]') : [];
         document.documentElement.setAttribute('data-feishu-image-inject-result', JSON.stringify({
           injected: count,
@@ -5813,7 +6040,7 @@
 
   function getImageInjectionStatus() {
     var needed = isImageInjectionNeeded();
-    var editable = document.querySelector('[data-content-editable-root="true"], [contenteditable="true"]');
+    var editable = getContentRootElement();
     var imageBlocks = editable ? editable.querySelectorAll('[data-block-type="image"]') : [];
     return { injectionNeeded: needed, imageBlockCount: imageBlocks.length };
   }

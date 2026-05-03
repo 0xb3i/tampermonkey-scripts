@@ -18,17 +18,19 @@ function createPassingFixture() {
           requiredSourceComponentTypes: ['callout', 'table', 'image', 'equation'],
         },
         upload: {
-          requireUploadedImages: true,
+          minUploadedCount: 2,
           maxFailedUploads: 0,
         },
         paste: {
           requireChanged: true,
         },
         render: {
-          compareSourceComponents: {
-            componentTypes: ['callout', 'table', 'image', 'equation'],
-            requireRenderedImages: true,
-          },
+          requiredTargetComponents: [
+            { type: 'callout', minCount: 1, requiredTextSamples: ['重点提示'] },
+            { type: 'table', minCount: 1 },
+            { type: 'image', minCount: 2, requireRendered: true },
+            { type: 'equation', minCount: 1, requiredTextGroups: [['x^2', 'x²', 'z^2', 'z²']] },
+          ],
         },
       },
     },
@@ -120,7 +122,7 @@ test('assertFeishuCaseResult rejects missing rendered equation component', () =>
 
   assert.throws(function () {
     assertFeishuCaseResult(fixture);
-  }, /render\.compareSourceComponents/);
+  }, /render\.requiredTargetComponents/);
 });
 
 test('assertFeishuCaseResult rejects image upload regressions', () => {
@@ -133,6 +135,47 @@ test('assertFeishuCaseResult rejects image upload regressions', () => {
   assert.throws(function () {
     assertFeishuCaseResult(fixture);
   }, /upload/);
+});
+
+test('assertFeishuCaseResult rejects missing key target component anchors', () => {
+  const fixture = createPassingFixture();
+  fixture.target.artifacts.validationSnapshot.semanticSnapshot.componentCounts.callout = 0;
+  fixture.target.artifacts.validationSnapshot.semanticSnapshot.components =
+    fixture.target.artifacts.validationSnapshot.semanticSnapshot.components.filter(function (component) {
+      return component.type !== 'callout';
+    });
+
+  assert.throws(function () {
+    assertFeishuCaseResult(fixture);
+  }, /render\.requiredTargetComponents/);
+});
+
+test('assertFeishuCaseResult accepts target text anchor groups with alternative renderings', () => {
+  const fixture = createPassingFixture();
+  fixture.target.artifacts.validationSnapshot.semanticSnapshot.components =
+    fixture.target.artifacts.validationSnapshot.semanticSnapshot.components.map(function (component) {
+      if (component.type !== 'equation') return component;
+      return { type: 'equation', textSample: 'β² + y² = z²' };
+    });
+
+  assert.doesNotThrow(function () {
+    assertFeishuCaseResult(fixture);
+  });
+});
+
+test('assertFeishuCaseResult prefers afterPasteSnapshot over post-cleanup artifact snapshot', () => {
+  const fixture = createPassingFixture();
+  fixture.target.validation.afterPasteSnapshot = fixture.target.artifacts.validationSnapshot;
+  fixture.target.artifacts.validationSnapshot = {
+    semanticSnapshot: {
+      componentCounts: {},
+      components: [],
+    },
+  };
+
+  assert.doesNotThrow(function () {
+    assertFeishuCaseResult(fixture);
+  });
 });
 
 test('summarizeFeishuCaseFailures produces readable failure labels', () => {
