@@ -59,9 +59,35 @@ test('userscript exposes upload result counts for runner assertions', () => {
   assert.match(source, /attemptedCount:/);
 });
 
+test('userscript captures whiteboard clone diagnostics for target-side failures', () => {
+  const source = fs.readFileSync(path.join(__dirname, '../userscripts/feishu-helper.user.js'), 'utf8');
+  assert.match(source, /FEISHU_WHITEBOARD_CLONE_RE/);
+  assert.match(source, /data-feishu-captured-whiteboard-clones/);
+});
+
+test('userscript exposes on-demand whiteboard hook tracing for native copy and paste diagnostics', () => {
+  const source = fs.readFileSync(path.join(__dirname, '../userscripts/feishu-helper.user.js'), 'utf8');
+  assert.match(source, /function installWhiteboardHookTracer\(/);
+  assert.match(source, /data-feishu-whiteboard-hook-state/);
+  assert.match(source, /data-feishu-whiteboard-hook-log/);
+  assert.match(source, /feishu-install-whiteboard-hook-debug/);
+});
+
 test('runner keeps the pasted target result instead of clearing it after validation', () => {
   const source = fs.readFileSync(path.join(__dirname, '../automation/feishu-runner.js'), 'utf8');
   assert.match(source, /initialSnapshot:\s*initialSnapshot/);
   assert.doesNotMatch(source, /result\.cleanup\s*=\s*await cleanupTargetDocumentToBaseline/);
   assert.doesNotMatch(source, /assertTargetCleanupResult\(result\)/);
+});
+
+test('runner reads whiteboard clone diagnostics from page artifacts', () => {
+  const source = fs.readFileSync(path.join(__dirname, '../automation/feishu-runner.js'), 'utf8');
+  assert.match(source, /whiteboardClones:\s*readJsonAttr\('data-feishu-captured-whiteboard-clones'\)/);
+});
+
+test('runner reads whiteboard hook diagnostics from page artifacts', () => {
+  const source = fs.readFileSync(path.join(__dirname, '../automation/feishu-runner.js'), 'utf8');
+  assert.match(source, /whiteboardHookState:\s*readJsonAttr\('data-feishu-whiteboard-hook-state'\)/);
+  assert.match(source, /whiteboardHookLog:\s*readJsonAttr\('data-feishu-whiteboard-hook-log'\)/);
+  assert.match(source, /feishu-install-whiteboard-hook-debug/);
 });

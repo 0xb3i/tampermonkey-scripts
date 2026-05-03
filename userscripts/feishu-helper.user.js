@@ -100,6 +100,20 @@
   // Always active — captures every upload/media POST so we can discover the
   // correct mount_point, headers, and body format that Feishu itself uses.
   var _feishuCapturedUploads = [];
+  var _feishuCapturedWhiteboardClones = [];
+  var _feishuWhiteboardHookLog = [];
+  var _feishuWhiteboardHookState = {
+    installed: false,
+    installedAt: '',
+    href: '',
+    wrappedPaths: [],
+    logCount: 0,
+    errors: [],
+  };
+  var _feishuWhiteboardHookCallSeq = 0;
+  var FEISHU_CAPTURED_REQUEST_LIMIT = 10;
+  var FEISHU_UPLOAD_REQUEST_RE = /upload|media|image|pre_upload|box\/stream|box\/image|put\//i;
+  var FEISHU_WHITEBOARD_CLONE_RE = /\/space\/api\/whiteboard\/block\/clone(?:[/?#]|$)/i;
   var _originalFetch = window.fetch;
   function _parseUrlQueryParams(url) {
     var params = {};
@@ -112,50 +126,206 @@
     } catch (e) {}
     return params;
   }
+  function _isCapturedRequest(url, method, urlRe, methodRe) {
+    return urlRe.test(String(url || '')) && (!methodRe || methodRe.test(String(method || 'GET')));
+  }
+  function _captureRequestHeaders(headers) {
+    var captured = {};
+    if (!headers) return captured;
+    try {
+      if (headers instanceof Headers) {
+        headers.forEach(function (v, k) { captured[k] = v; });
+      } else if (typeof headers === 'object') {
+        Object.keys(headers).forEach(function (k) { captured[k] = headers[k]; });
+      }
+    } catch (e) {}
+    return captured;
+  }
+  function _summarizeDiagnosticJsonValue(value, depth) {
+    depth = Number(depth || 0);
+    if (value == null || typeof value !== 'object') {
+      return typeof value === 'string' ? summarizeDebugText(value, 160) : value;
+    }
+    if (depth >= 2) {
+      return Array.isArray(value)
+        ? { type: 'array', length: value.length }
+        : { type: 'object', keys: Object.keys(value).slice(0, 12) };
+    }
+    if (Array.isArray(value)) {
+      return {
+        type: 'array',
+        length: value.length,
+        sample: value.slice(0, 4).map(function (item) {
+          return _summarizeDiagnosticJsonValue(item, depth + 1);
+        }),
+      };
+    }
+    var summary = {
+      keys: Object.keys(value).slice(0, 20),
+    };
+    [
+      'code',
+      'msg',
+      'message',
+      'baseToken',
+      'token',
+      'blockToken',
+      'whiteboardToken',
+      'cloneToken',
+      'obj_token',
+      'status',
+    ].forEach(function (key) {
+      if (value[key] !== undefined) {
+        summary[key] = _summarizeDiagnosticJsonValue(value[key], depth + 1);
+      }
+    });
+    ['data', 'result', 'payload', 'response'].forEach(function (key) {
+      if (value[key] && typeof value[key] === 'object') {
+        summary[key] = _summarizeDiagnosticJsonValue(value[key], depth + 1);
+      }
+    });
+    return summary;
+  }
+  function _summarizeCapturedPayloadText(rawText, options) {
+    var text = String(rawText || '').trim();
+    var previewKey = options && options.previewKey ? String(options.previewKey) : 'textPreview';
+    var summaryKey = options && options.summaryKey ? String(options.summaryKey) : 'jsonSummary';
+    var summary = {};
+    if (!text) return summary;
+    summary[previewKey] = summarizeDebugText(text, 600);
+    summary.textLength = text.length;
+    try {
+      summary[summaryKey] = _summarizeDiagnosticJsonValue(JSON.parse(text), 0);
+    } catch (error) {}
+    return summary;
+  }
+  function _summarizeCapturedRequestBody(body) {
+    var summary = {
+      bodyType: body ? (typeof body === 'string' ? 'string' : (body instanceof FormData ? 'FormData' : (body instanceof Blob ? 'Blob' : typeof body))) : 'none',
+    };
+    if (!body) return summary;
+    if (typeof body === 'string') {
+      return Object.assign(summary, _summarizeCapturedPayloadText(body, {
+        previewKey: 'bodyPreview',
+        summaryKey: 'bodyJsonSummary',
+      }));
+    }
+    if (typeof URLSearchParams !== 'undefined' && body instanceof URLSearchParams) {
+      return Object.assign(summary, _summarizeCapturedPayloadText(String(body), {
+        previewKey: 'bodyPreview',
+        summaryKey: 'bodyJsonSummary',
+      }));
+    }
+    if (body instanceof FormData) {
+      summary.formDataFields = [];
+      try {
+        body.forEach(function (val, key) {
+          var entry = { key: key };
+          if (val instanceof File || val instanceof Blob) {
+            entry.type = val instanceof File ? 'File' : 'Blob';
+            if (val instanceof File) entry.fileName = val.name;
+          } else {
+            entry.type = 'string';
+            entry.value = String(val).substring(0, 200);
+          }
+          summary.formDataFields.push(entry);
+        });
+      } catch (e) {}
+      return summary;
+    }
+    if (body instanceof Blob) {
+      summary.blobSize = Number(body.size || 0);
+      summary.blobType = String(body.type || '');
+      return summary;
+    }
+    return summary;
+  }
+  function _syncCapturedRequestAttr(attrName, records) {
+    try {
+      document.documentElement.setAttribute(attrName, JSON.stringify((records || []).slice(-FEISHU_CAPTURED_REQUEST_LIMIT)));
+    } catch (e) {}
+  }
+  function _recordWhiteboardCloneCapture(captured) {
+    if (!captured) return null;
+    _feishuCapturedWhiteboardClones.push(captured);
+    _syncCapturedRequestAttr('data-feishu-captured-whiteboard-clones', _feishuCapturedWhiteboardClones);
+    return captured;
+  }
+  function _updateWhiteboardCloneCapture(captured, patch) {
+    if (!captured || !patch || typeof patch !== 'object') return;
+    Object.keys(patch).forEach(function (key) {
+      captured[key] = patch[key];
+    });
+    _syncCapturedRequestAttr('data-feishu-captured-whiteboard-clones', _feishuCapturedWhiteboardClones);
+  }
   window.fetch = function (input, init) {
     var url = typeof input === 'string' ? input : (input instanceof Request ? input.url : String(input || ''));
     var method = (init && init.method) || (input instanceof Request ? input.method : 'GET');
-    if (/upload|media|image|pre_upload|box\/stream|box\/image|put\//i.test(url) && /post|put/i.test(method || 'GET')) {
+    var body = init && Object.prototype.hasOwnProperty.call(init, 'body') ? init.body : null;
+    if (_isCapturedRequest(url, method, FEISHU_UPLOAD_REQUEST_RE, /post|put/i)) {
       var captured = {
         url: url,
         method: method,
+        transport: 'fetch',
         timestamp: Date.now(),
-        headers: {},
-        bodyType: init && init.body ? (typeof init.body === 'string' ? 'string' : (init.body instanceof FormData ? 'FormData' : (init.body instanceof Blob ? 'Blob' : typeof init.body))) : 'none',
+        headers: _captureRequestHeaders(init && init.headers),
         queryParams: _parseUrlQueryParams(url),
       };
-      // Capture headers if possible
-      if (init && init.headers) {
-        try {
-          if (init.headers instanceof Headers) {
-            init.headers.forEach(function (v, k) { captured.headers[k] = v; });
-          } else if (typeof init.headers === 'object') {
-            Object.keys(init.headers).forEach(function (k) { captured.headers[k] = init.headers[k]; });
-          }
-        } catch (e) {}
-      }
-      // For FormData body, capture field names and file entry details
-      if (init && init.body instanceof FormData) {
-        captured.formDataFields = [];
-        try {
-          init.body.forEach(function (val, key) {
-            var entry = { key: key };
-            if (val instanceof File || val instanceof Blob) {
-              entry.type = val instanceof File ? 'File' : 'Blob';
-              if (val instanceof File) entry.fileName = val.name;
-            } else {
-              entry.type = 'string';
-              entry.value = String(val).substring(0, 200);
-            }
-            captured.formDataFields.push(entry);
-          });
-        } catch (e) {}
-      }
+      Object.assign(captured, _summarizeCapturedRequestBody(body));
       _feishuCapturedUploads.push(captured);
       console.info('[Feishu Helper] Captured upload request:', url, captured.queryParams);
-      try { document.documentElement.setAttribute('data-feishu-captured-uploads', JSON.stringify(_feishuCapturedUploads.slice(-10))); } catch (e) {}
+      _syncCapturedRequestAttr('data-feishu-captured-uploads', _feishuCapturedUploads);
     }
-    return _originalFetch.apply(this, arguments);
+    var whiteboardCapture = null;
+    if (_isCapturedRequest(url, method, FEISHU_WHITEBOARD_CLONE_RE, /post/i)) {
+      whiteboardCapture = _recordWhiteboardCloneCapture({
+        url: url,
+        method: method,
+        transport: 'fetch',
+        timestamp: Date.now(),
+        headers: _captureRequestHeaders(init && init.headers),
+        queryParams: _parseUrlQueryParams(url),
+      });
+      Object.assign(whiteboardCapture, _summarizeCapturedRequestBody(body));
+      _updateWhiteboardCloneCapture(whiteboardCapture, {
+        diagnosticType: 'whiteboardClone',
+      });
+      console.info('[Feishu Helper] Captured whiteboard clone request:', url);
+    }
+    var fetchResult = _originalFetch.apply(this, arguments);
+    if (!whiteboardCapture || !fetchResult || typeof fetchResult.then !== 'function') {
+      return fetchResult;
+    }
+    return fetchResult.then(function (response) {
+      _updateWhiteboardCloneCapture(whiteboardCapture, {
+        ok: !!(response && response.ok),
+        status: Number(response && response.status || 0),
+        statusText: String(response && response.statusText || ''),
+        responseCapturedAt: Date.now(),
+      });
+      if (response && typeof response.clone === 'function') {
+        response.clone().text().then(function (text) {
+          _updateWhiteboardCloneCapture(
+            whiteboardCapture,
+            _summarizeCapturedPayloadText(text, {
+              previewKey: 'responsePreview',
+              summaryKey: 'responseJsonSummary',
+            })
+          );
+        }).catch(function (error) {
+          _updateWhiteboardCloneCapture(whiteboardCapture, {
+            responseReadError: stringifyError(error),
+          });
+        });
+      }
+      return response;
+    }).catch(function (error) {
+      _updateWhiteboardCloneCapture(whiteboardCapture, {
+        fetchError: stringifyError(error),
+        responseCapturedAt: Date.now(),
+      });
+      throw error;
+    });
   };
   registerRuntimeDisposer(function () { window.fetch = _originalFetch; });
 
@@ -169,34 +339,58 @@
   XMLHttpRequest.prototype.send = function (body) {
     if (this._feishuInterceptorInfo) {
       var info = this._feishuInterceptorInfo;
-      if (/upload|media|image|pre_upload|box\/stream|box\/image|put\//i.test(info.url)) {
+      if (_isCapturedRequest(info.url, info.method, FEISHU_UPLOAD_REQUEST_RE)) {
         var captured = {
           url: info.url,
           method: info.method,
+          transport: 'xhr',
           timestamp: Date.now(),
-          bodyType: body ? (typeof body === 'string' ? 'string' : (body instanceof FormData ? 'FormData' : (body instanceof Blob ? 'Blob' : typeof body))) : 'none',
           queryParams: _parseUrlQueryParams(info.url),
           xhr: true,
         };
-        if (body instanceof FormData) {
-          captured.formDataFields = [];
-          try {
-            body.forEach(function (val, key) {
-              var entry = { key: key };
-              if (val instanceof File || val instanceof Blob) {
-                entry.type = val instanceof File ? 'File' : 'Blob';
-                if (val instanceof File) entry.fileName = val.name;
-              } else {
-                entry.type = 'string';
-                entry.value = String(val).substring(0, 200);
-              }
-              captured.formDataFields.push(entry);
-            });
-          } catch (e) {}
-        }
+        Object.assign(captured, _summarizeCapturedRequestBody(body));
         _feishuCapturedUploads.push(captured);
         console.info('[Feishu Helper] Captured XHR upload request:', info.url, captured.queryParams);
-        try { document.documentElement.setAttribute('data-feishu-captured-uploads', JSON.stringify(_feishuCapturedUploads.slice(-10))); } catch (e) {}
+        _syncCapturedRequestAttr('data-feishu-captured-uploads', _feishuCapturedUploads);
+      }
+      if (_isCapturedRequest(info.url, info.method, FEISHU_WHITEBOARD_CLONE_RE, /post/i)) {
+        var xhrCloneCapture = _recordWhiteboardCloneCapture({
+          url: info.url,
+          method: info.method,
+          transport: 'xhr',
+          timestamp: Date.now(),
+          queryParams: _parseUrlQueryParams(info.url),
+          xhr: true,
+          diagnosticType: 'whiteboardClone',
+        });
+        Object.assign(xhrCloneCapture, _summarizeCapturedRequestBody(body));
+        try {
+          this.addEventListener('loadend', function onFeishuWhiteboardCloneLoadEnd() {
+            try {
+              this.removeEventListener('loadend', onFeishuWhiteboardCloneLoadEnd);
+            } catch (e) {}
+            var patch = {
+              ok: Number(this.status || 0) >= 200 && Number(this.status || 0) < 300,
+              status: Number(this.status || 0),
+              statusText: String(this.statusText || ''),
+              responseCapturedAt: Date.now(),
+            };
+            try {
+              Object.assign(patch, _summarizeCapturedPayloadText(this.responseText, {
+                previewKey: 'responsePreview',
+                summaryKey: 'responseJsonSummary',
+              }));
+            } catch (error) {
+              patch.responseReadError = stringifyError(error);
+            }
+            _updateWhiteboardCloneCapture(xhrCloneCapture, patch);
+          });
+        } catch (error) {
+          _updateWhiteboardCloneCapture(xhrCloneCapture, {
+            listenerError: stringifyError(error),
+          });
+        }
+        console.info('[Feishu Helper] Captured XHR whiteboard clone request:', info.url);
       }
     }
     return _originalXHRSend.apply(this, arguments);
@@ -1169,6 +1363,381 @@
     }
 
     return { ok: true, root: editorAPI, value: current, label: currentLabel };
+  }
+
+  function syncWhiteboardHookDebugState() {
+    _feishuWhiteboardHookState.logCount = _feishuWhiteboardHookLog.length;
+    _feishuWhiteboardHookState.href = location.href;
+    try {
+      document.documentElement.setAttribute(
+        'data-feishu-whiteboard-hook-state',
+        JSON.stringify(_feishuWhiteboardHookState)
+      );
+    } catch (error) {}
+    _syncCapturedRequestAttr('data-feishu-whiteboard-hook-log', _feishuWhiteboardHookLog);
+  }
+
+  function resetWhiteboardHookDebugLog() {
+    _feishuWhiteboardHookLog = [];
+    _feishuWhiteboardHookState.errors = [];
+    syncWhiteboardHookDebugState();
+  }
+
+  function summarizeWhiteboardRecordMap(recordMap) {
+    if (!recordMap || typeof recordMap !== 'object') return null;
+    var recordIds = Object.keys(recordMap);
+    var whiteboardRecords = [];
+    recordIds.forEach(function (recordId) {
+      var record = recordMap[recordId];
+      var snapshot = record && record.snapshot;
+      if (!(snapshot && snapshot.type === 'whiteboard')) return;
+      whiteboardRecords.push({
+        id: String(record && record.id || recordId || ''),
+        token: String(snapshot.token || snapshot.blockToken || ''),
+        parent_id: String(record && record.parent_id || snapshot.parent_id || ''),
+      });
+    });
+    if (!whiteboardRecords.length) return null;
+    return {
+      recordCount: recordIds.length,
+      whiteboardCount: whiteboardRecords.length,
+      whiteboardRecords: whiteboardRecords.slice(0, 6),
+    };
+  }
+
+  function summarizeWhiteboardHookValue(value, depth, visited) {
+    depth = Number(depth || 0);
+    if (!visited) visited = createVisitedStore();
+
+    if (value == null) return value;
+
+    var valueType = typeof value;
+    if (valueType === 'string') {
+      return {
+        type: 'string',
+        length: value.length,
+        preview: summarizeDebugText(value, 220),
+      };
+    }
+    if (valueType === 'number' || valueType === 'boolean') return value;
+    if (valueType === 'function') {
+      return {
+        type: 'function',
+        name: String(value.name || ''),
+        length: Number(value.length || 0),
+        wrapped: value.__feishuWhiteboardHookTracer === true,
+      };
+    }
+    if (visited.has(value)) {
+      return {
+        type: 'circular',
+      };
+    }
+    visited.add(value);
+
+    if (typeof Promise !== 'undefined' && value instanceof Promise) {
+      return { type: 'promise' };
+    }
+    if (typeof ClipboardEvent !== 'undefined' && value instanceof ClipboardEvent) {
+      return {
+        type: 'ClipboardEvent',
+        trusted: !!value.isTrusted,
+        clipboardData: summarizeWhiteboardHookValue(value.clipboardData, depth + 1, visited),
+      };
+    }
+    if (typeof DataTransfer !== 'undefined' && value instanceof DataTransfer) {
+      var types = [];
+      try { types = Array.from(value.types || []); } catch (error) {}
+      return {
+        type: 'DataTransfer',
+        types: types,
+      };
+    }
+    if (typeof Element !== 'undefined' && value instanceof Element) {
+      return {
+        type: 'Element',
+        tagName: String(value.tagName || ''),
+        blockType: String(value.getAttribute && value.getAttribute('data-block-type') || ''),
+        ariaLabel: summarizeDebugText(value.getAttribute && value.getAttribute('aria-label') || '', 120),
+        className: summarizeDebugText(value.className || '', 120),
+        textPreview: summarizeDebugText(value.textContent || '', 120),
+      };
+    }
+    if (Array.isArray(value)) {
+      return {
+        type: 'array',
+        length: value.length,
+        sample: value.slice(0, 4).map(function (item) {
+          return summarizeWhiteboardHookValue(item, depth + 1, visited);
+        }),
+      };
+    }
+    if (typeof Map !== 'undefined' && value instanceof Map) {
+      return {
+        type: 'Map',
+        size: value.size,
+        keys: Array.from(value.keys()).slice(0, 8).map(function (item) {
+          return summarizeWhiteboardHookValue(item, depth + 1, visited);
+        }),
+      };
+    }
+    if (typeof Set !== 'undefined' && value instanceof Set) {
+      return {
+        type: 'Set',
+        size: value.size,
+        sample: Array.from(value.values()).slice(0, 4).map(function (item) {
+          return summarizeWhiteboardHookValue(item, depth + 1, visited);
+        }),
+      };
+    }
+
+    var keys = safeGetOwnKeys(value).slice(0, 20);
+    var summary = {
+      type: value && value.constructor && value.constructor.name
+        ? String(value.constructor.name)
+        : valueType,
+      keys: keys,
+    };
+
+    [
+      'type',
+      'blockType',
+      'id',
+      'name',
+      'token',
+      'blockToken',
+      'whiteboardToken',
+      'originWhiteboardToken',
+      'originWhiteboardVersion',
+      'baseToken',
+      'obj_token',
+      'objToken',
+      'parent_id',
+      'parentId',
+      'rootId',
+      'whiteboardVersion',
+      'mode',
+      'baseTokenType',
+      'reqVersion',
+      'status',
+      'code',
+      'msg',
+      'message',
+    ].forEach(function (key) {
+      var childRead = safeReadProperty(value, key);
+      if (!childRead.ok || childRead.value === undefined) return;
+      summary[key] = summarizeWhiteboardHookValue(childRead.value, depth + 1, visited);
+    });
+
+    if (depth >= 2) {
+      return summary;
+    }
+
+    ['record', 'snapshot', 'data', 'payload', 'result', 'context'].forEach(function (key) {
+      var childRead = safeReadProperty(value, key);
+      if (!childRead.ok || !childRead.value || typeof childRead.value !== 'object') return;
+      summary[key] = summarizeWhiteboardHookValue(childRead.value, depth + 1, visited);
+    });
+
+    var recordMapRead = safeReadProperty(value, 'recordMap');
+    if (recordMapRead.ok) {
+      summary.recordMap = summarizeWhiteboardRecordMap(recordMapRead.value);
+    }
+
+    ['recordIds', 'blockIds', 'selection'].forEach(function (key) {
+      var childRead = safeReadProperty(value, key);
+      if (!childRead.ok || !Array.isArray(childRead.value)) return;
+      summary[key] = {
+        length: childRead.value.length,
+        sample: childRead.value.slice(0, 6).map(function (item) {
+          return summarizeWhiteboardHookValue(item, depth + 1, visited);
+        }),
+      };
+    });
+
+    return summary;
+  }
+
+  function summarizeWhiteboardHookArgs(argsLike) {
+    return Array.prototype.slice.call(argsLike || []).map(function (arg) {
+      return summarizeWhiteboardHookValue(arg, 0, createVisitedStore());
+    });
+  }
+
+  function recordWhiteboardHookLog(entry) {
+    if (!entry || typeof entry !== 'object') return;
+    _feishuWhiteboardHookLog.push(entry);
+    _feishuWhiteboardHookState.logCount = _feishuWhiteboardHookLog.length;
+    syncWhiteboardHookDebugState();
+  }
+
+  function createWhiteboardHookLogEntry(meta, phase) {
+    return {
+      callId: 'whiteboard-hook-' + (++_feishuWhiteboardHookCallSeq),
+      phase: String(phase || ''),
+      timestamp: Date.now(),
+      href: location.href,
+      path: meta && meta.path ? String(meta.path) : '',
+      feature: meta && meta.feature ? String(meta.feature) : '',
+      method: meta && meta.method ? String(meta.method) : '',
+      blockType: meta && meta.blockType ? String(meta.blockType) : '',
+    };
+  }
+
+  function wrapWhiteboardHookFunction(target, methodName, meta) {
+    if (!target || typeof target[methodName] !== 'function') {
+      return { ok: false, reason: 'missing-function' };
+    }
+
+    var current = target[methodName];
+    if (current.__feishuWhiteboardHookTracer === true) {
+      return { ok: true, alreadyWrapped: true };
+    }
+
+    var wrapped = function () {
+      var callEntry = createWhiteboardHookLogEntry(meta, 'call');
+      callEntry.argsBefore = summarizeWhiteboardHookArgs(arguments);
+      callEntry.thisValue = summarizeWhiteboardHookValue(this, 0, createVisitedStore());
+      recordWhiteboardHookLog(callEntry);
+
+      var result;
+      try {
+        result = current.apply(this, arguments);
+      } catch (error) {
+        var throwEntry = createWhiteboardHookLogEntry(meta, 'throw');
+        throwEntry.argsAfter = summarizeWhiteboardHookArgs(arguments);
+        throwEntry.error = stringifyError(error);
+        recordWhiteboardHookLog(throwEntry);
+        throw error;
+      }
+
+      var returnEntry = createWhiteboardHookLogEntry(meta, 'return');
+      returnEntry.argsAfter = summarizeWhiteboardHookArgs(arguments);
+      if (result && typeof result.then === 'function') {
+        returnEntry.result = { type: 'promise' };
+        recordWhiteboardHookLog(returnEntry);
+        return result.then(function (resolved) {
+          var resolveEntry = createWhiteboardHookLogEntry(meta, 'resolve');
+          resolveEntry.result = summarizeWhiteboardHookValue(resolved, 0, createVisitedStore());
+          recordWhiteboardHookLog(resolveEntry);
+          return resolved;
+        }).catch(function (error) {
+          var rejectEntry = createWhiteboardHookLogEntry(meta, 'reject');
+          rejectEntry.error = stringifyError(error);
+          recordWhiteboardHookLog(rejectEntry);
+          throw error;
+        });
+      }
+
+      returnEntry.result = summarizeWhiteboardHookValue(result, 0, createVisitedStore());
+      recordWhiteboardHookLog(returnEntry);
+      return result;
+    };
+
+    wrapped.__feishuWhiteboardHookTracer = true;
+    wrapped.__feishuWhiteboardHookTracerOriginal = current;
+    target[methodName] = wrapped;
+    return { ok: true, alreadyWrapped: false };
+  }
+
+  function listWhiteboardFeatureEntries(featureName) {
+    var resolved = resolveEditorPath('editorAPI.featureService._contentMap.' + featureName);
+    if (!resolved.ok || !resolved.value) return [];
+
+    var entries = [];
+    safeGetOwnKeys(resolved.value).forEach(function (key) {
+      var childRead = safeReadProperty(resolved.value, key);
+      if (!childRead.ok || !childRead.value) return;
+      var entry = childRead.value;
+      var blockSetting = entry && entry.blockSetting;
+      if (!(blockSetting && String(blockSetting.blockType || '') === 'whiteboard')) return;
+      entries.push({
+        key: String(key),
+        value: entry,
+        blockSetting: blockSetting,
+      });
+    });
+    return entries;
+  }
+
+  function installWhiteboardHookTracer(options) {
+    var opts = options && typeof options === 'object' ? options : {};
+    if (opts.reset !== false) {
+      resetWhiteboardHookDebugLog();
+    }
+
+    var wrappedPaths = [];
+    var errors = [];
+    var featureMap = resolveEditorPath('editorAPI.featureService._contentMap');
+    var featureNames = featureMap.ok && featureMap.value
+      ? safeGetOwnKeys(featureMap.value).filter(function (name) {
+        return /clipboard|copy|paste/i.test(String(name || ''));
+      })
+      : [];
+
+    featureNames.forEach(function (featureName) {
+      listWhiteboardFeatureEntries(featureName).forEach(function (entry) {
+        safeGetOwnKeys(entry.blockSetting).forEach(function (methodName) {
+          if (typeof entry.blockSetting[methodName] !== 'function') return;
+          if (!/^on[A-Z]/.test(String(methodName || ''))) return;
+          var path = 'editorAPI.featureService._contentMap.' + featureName + '.' + entry.key + '.blockSetting.' + methodName;
+          try {
+            var wrapResult = wrapWhiteboardHookFunction(entry.blockSetting, methodName, {
+              path: path,
+              feature: featureName,
+              blockType: 'whiteboard',
+              method: methodName,
+            });
+            if (wrapResult && wrapResult.ok) {
+              wrappedPaths.push({
+                path: path,
+                alreadyWrapped: wrapResult.alreadyWrapped === true,
+              });
+            }
+          } catch (error) {
+            errors.push({
+              path: path,
+              error: stringifyError(error),
+            });
+          }
+        });
+      });
+    });
+
+    var whiteboardConfig = resolveEditorPath('editorAPI.dataService.dataProvider.configs.whiteboard');
+    if (whiteboardConfig.ok && whiteboardConfig.value && typeof whiteboardConfig.value.createSnapshot === 'function') {
+      try {
+        var snapshotWrapResult = wrapWhiteboardHookFunction(whiteboardConfig.value, 'createSnapshot', {
+          path: 'editorAPI.dataService.dataProvider.configs.whiteboard.createSnapshot',
+          feature: 'whiteboard-config',
+          blockType: 'whiteboard',
+          method: 'createSnapshot',
+        });
+        if (snapshotWrapResult && snapshotWrapResult.ok) {
+          wrappedPaths.push({
+            path: 'editorAPI.dataService.dataProvider.configs.whiteboard.createSnapshot',
+            alreadyWrapped: snapshotWrapResult.alreadyWrapped === true,
+          });
+        }
+      } catch (error) {
+        errors.push({
+          path: 'editorAPI.dataService.dataProvider.configs.whiteboard.createSnapshot',
+          error: stringifyError(error),
+        });
+      }
+    }
+
+    _feishuWhiteboardHookState = {
+      installed: true,
+      installedAt: new Date().toISOString(),
+      href: location.href,
+      wrappedPaths: wrappedPaths,
+      featureNames: featureNames,
+      logCount: _feishuWhiteboardHookLog.length,
+      errors: errors,
+    };
+    syncWhiteboardHookDebugState();
+    return _feishuWhiteboardHookState;
   }
 
   function storeCaptureRawData(capture, type, value) {
@@ -5640,6 +6209,31 @@
       }
     } catch (e) {}
   }, true);
+  registerEventListener(document, 'feishu-install-whiteboard-hook-debug', function (e) {
+    try {
+      installWhiteboardHookTracer(e && e.detail ? e.detail : {});
+    } catch (error) {
+      _feishuWhiteboardHookState = {
+        installed: false,
+        installedAt: '',
+        href: location.href,
+        wrappedPaths: [],
+        logCount: _feishuWhiteboardHookLog.length,
+        errors: [{ error: stringifyError(error) }],
+      };
+      syncWhiteboardHookDebugState();
+    }
+  }, true);
+  registerEventListener(document, 'feishu-reset-whiteboard-hook-debug', function () {
+    try {
+      resetWhiteboardHookDebugLog();
+    } catch (error) {}
+  }, true);
+  registerEventListener(document, 'feishu-read-whiteboard-hook-debug', function () {
+    try {
+      syncWhiteboardHookDebugState();
+    } catch (error) {}
+  }, true);
   registerEventListener(document, 'feishu-call-service', function (e) {
     try {
       var serviceName = e.detail && e.detail.service ? String(e.detail.service) : '';
@@ -6486,6 +7080,8 @@
       findEditorPaths: findEditorPaths,
       debugEditorAPI: debugEditorAPI,
       captureNextCopy: captureNextCopy,
+      installWhiteboardHookTracer: installWhiteboardHookTracer,
+      resetWhiteboardHookDebugLog: resetWhiteboardHookDebugLog,
       debugRichStyles: debugRichStyles,
       debugEquations: debugEquations,
       getLastDocxRecord: function () {

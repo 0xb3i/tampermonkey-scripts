@@ -213,6 +213,9 @@ async function readAutomationArtifacts(page) {
       validationSnapshot: readJsonAttr('data-feishu-validation-snapshot'),
       nativePastePrepare: readJsonAttr('data-feishu-native-paste-prepare'),
       uploadResult: readJsonAttr('data-feishu-upload-result'),
+      whiteboardClones: readJsonAttr('data-feishu-captured-whiteboard-clones'),
+      whiteboardHookState: readJsonAttr('data-feishu-whiteboard-hook-state'),
+      whiteboardHookLog: readJsonAttr('data-feishu-whiteboard-hook-log'),
     };
   });
 }
@@ -486,8 +489,24 @@ async function prepareNativeClipboard(page, timeoutMs) {
   return readJsonDocumentAttribute(page, 'data-feishu-native-paste-prepare');
 }
 
+async function installWhiteboardHookDebug(page, options) {
+  await dispatchDocumentEvent(page, 'feishu-install-whiteboard-hook-debug', {
+    reset: !(options && options.reset === false),
+  });
+  await page.waitForFunction(function () {
+    return !!document.documentElement.getAttribute('data-feishu-whiteboard-hook-state');
+  }, null, { timeout: 10000 });
+  return readJsonDocumentAttribute(page, 'data-feishu-whiteboard-hook-state');
+}
+
+async function refreshWhiteboardHookDebug(page) {
+  await dispatchDocumentEvent(page, 'feishu-read-whiteboard-hook-debug', {});
+  return readJsonDocumentAttribute(page, 'data-feishu-whiteboard-hook-state');
+}
+
 async function runTargetPasteValidation(page, options) {
   var timeoutMs = Number(options && options.timeoutMs || DEFAULT_TIMEOUT_MS);
+  var whiteboardHookState = await installWhiteboardHookDebug(page, { reset: true });
   await focusFeishuEditor(page);
   var initialSnapshot = await captureStableCleanupSnapshot(page);
   var baselineSnapshot = await clearTargetDocument(page);
@@ -502,6 +521,7 @@ async function runTargetPasteValidation(page, options) {
     baselineSnapshot: baselineSnapshot,
     baselineSignature: baselineSignature,
     nativePrepare: nativePrepare,
+    whiteboardHookState: whiteboardHookState,
   };
 
   var primaryTrigger = { triggered: 'Cmd+Shift+P' };
@@ -551,6 +571,7 @@ async function runTargetPasteValidation(page, options) {
   }
 
   await page.waitForTimeout(DEFAULT_SHORT_WAIT_MS);
+  await refreshWhiteboardHookDebug(page);
   result.afterPasteSnapshot = await captureStableCleanupSnapshot(page);
   return result;
 }
@@ -690,6 +711,9 @@ async function runSingleFeishuCaseTest(selectedCase, options) {
           targetArtifacts ? targetArtifacts.validationSnapshot : null
         ),
         uploadResult: targetArtifacts && targetArtifacts.uploadResult ? targetArtifacts.uploadResult : null,
+        whiteboardClones: targetArtifacts && targetArtifacts.whiteboardClones ? targetArtifacts.whiteboardClones : null,
+        whiteboardHookState: targetArtifacts && targetArtifacts.whiteboardHookState ? targetArtifacts.whiteboardHookState : null,
+        whiteboardHookLog: targetArtifacts && targetArtifacts.whiteboardHookLog ? targetArtifacts.whiteboardHookLog : null,
       };
       throw new Error(
         (error && error.message ? error.message : String(error))
