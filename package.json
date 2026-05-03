@@ -11,7 +11,8 @@
     "copycleaner:gemini": "node automation/copy-cleaner-runner.js --site gemini",
     "copycleaner:prompttest": "node automation/copy-cleaner-runner.js --site chatgpt --case chatgpt-basic-cleanup",
     "copycleaner:tika": "node automation/copy-cleaner-runner.js --site tika",
-    "feishu:realtest": "node automation/feishu-real-test-runner.js",
+    "feishu:test": "node automation/feishu-runner.js",
+    "feishu:cases": "node automation/feishu-runner.js --list-cases",
     "tampermonkey:sync": "node bin/tampermonkey-sync-cli.cjs"
   },
   "bin": {

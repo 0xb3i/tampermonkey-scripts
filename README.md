@@ -1,120 +1,122 @@
 # tampermonkey-scripts
 
-油猴脚本集合，提升网页浏览体验。
+油猴脚本集合，当前主要维护两类能力：
 
-## 目录结构
+- `feishu-helper`：绕过飞书文档复制限制，保留结构和图片。
+- `copy-cleaner`：清理 AI 站点复制噪音，把公式和列表格式收敛成更稳定的 Markdown。
 
-- `userscripts/`：实际安装到 Tampermonkey 的 userscript
-- `lib/`：CDP 同步、站点粘贴验证等可复用库
-- `automation/`：真实浏览器回归 runner 与 oracle case
-- `bin/`：命令行入口
-- `tests/`：低成本单测
+## 目录
 
-## 脚本列表
+- `userscripts/`：实际安装到 Tampermonkey 的脚本
+- `automation/`：真实浏览器回归 runner 和内置 case
+- `lib/`：CDP、Tampermonkey 同步、站点适配等复用逻辑
+- `bin/`：CLI 入口
+- `tests/`：单测
+
+## 脚本
 
 ### 飞书文档助手
 
-解除飞书文档复制限制，1:1 复刻飞书文档。允许在无复制权限的页面中右键复制图片。
+作用：
 
-**安装：** 将 [userscripts/feishu-helper.user.js](userscripts/feishu-helper.user.js) 的内容添加到 Tampermonkey 新脚本中。
+- 提取源文档完整结构并粘贴到目标文档
+- 允许在无复制权限页面右键复制图片
+- 1:1 保留标题、列表、表格、grid、callout、引用、代码块、分割线、书签、公式
 
-**适用页面：** `feishu.cn`、`larksuite.com`、`larkoffice.com` 下的所有页面
+安装：
 
-#### 快捷键
+- 将 [userscripts/feishu-helper.user.js](userscripts/feishu-helper.user.js) 添加到 Tampermonkey
 
-| 快捷键           | 功能           |
-| ------------- | ------------ |
+适用页面：
+
+- `feishu.cn`
+- `larksuite.com`
+- `larkoffice.com`
+
+快捷键：
+
+| 快捷键 | 功能 |
+| --- | --- |
 | `Cmd+Shift+D` | 在源文档页面提取完整内容 |
-| `Cmd+Shift+P` | 在目标文档页面粘贴副本  |
-| `Cmd+Shift+I` | 提取页面所有图片     |
+| `Cmd+Shift+P` | 在目标文档页面粘贴副本 |
+| `Cmd+Shift+I` | 提取页面所有图片 |
 
-#### 操作流程
+图片处理要点：
 
-1. 在源文档页面按 `Cmd+Shift+D` 提取内容
-2. 在目标文档页面按 `Cmd+Shift+P`
+- 飞书图片 token 绑定文档，不能直接复用源文档 token。
+- 脚本会收集图片 base64，上传到目标文档，再把 `docxRecord` 里的旧 token 替换成新 token。
+- 表格内图片不会稳定出现在 HTML 里，因此会回退扫描 `docxRecord.recordMap`。
+- wiki 页面不能直接用 URL 里的 wiki token；需要先通过 `get_node` 解析真实 `obj_token`。
 
-**支持的完整结构**：标题、正文、列表、表格、grid 多栏、callout、引用、代码块、分割线、书签、公式等。
+自动测试：
 
-#### 图片复制原理
+```bash
+npm run feishu:test
+npm run feishu:cases
+```
 
-飞书文档的图片 token 是文档绑定的，直接粘贴源文档的 docxRecord 会导致图片全部丢失。解决方案：
+Feishu 回归不是全文文本比对，而是固定源文档 -> 固定目标 wiki 的关键节点校验，重点看：
 
-1. 提取阶段：从 HTML 和 docxRecord 中收集所有图片的 base64 数据
-2. 上传阶段：先解析目标 wiki/doc 的真实 `obj_token`，再通过 `POST /space/api/box/stream/upload/all/?mount_point=docx_image` 将图片上传到目标文档，获取新的 `file_token`
-3. 替换阶段：将 docxRecord 中的旧 token 替换为新 token
-4. 粘贴阶段：写入包含有效 token 的完整 docxRecord，飞书粘贴解析器会创建图片块
-
-**表格内图片的特殊处理**：表格内的图片不会出现在 `blockToHtml` 生成的 HTML 中，因此无法通过 HTML 中的 CDN URL 获取 base64。修复方式是直接遍历 `docxRecord.recordMap` 中所有图片块，对缺少 base64 的图片用 token 调取 `/space/api/box/stream/download/preview/TOKEN` 下载。
-
-**wiki 页面注意事项**：`mount_node_token` 不能直接使用 URL 里的 wiki token。当前在 `my.feishu.cn` 上需要通过 `GET /space/api/wiki/v2/tree/get_node/?wiki_token=...&expand_shortcut=true&with_deleted=true` 解析真实 `obj_token`，否则上传会返回 `mount node not exist`，最终表现为“上传了 0 张图片”。
-
-***
+- 提取阶段是否得到 `pendingPaste`、块数、公式数和语义快照
+- 图片上传是否产出 `uploadedCount` / `failedCount`
+- 目标文档结构是否真的发生变化
+- 图片、表格、高亮块、公式、引用、代码块、分割线、grid、bookmark 等关键组件是否重新渲染出来
 
 ### 复制净化器
 
-复制时自动清理 AI 生成内容中的格式噪音，并将网页前端复制数学公式得到的 Unicode 乱码转化为 LaTeX 格式。
+作用：
 
-**安装：** 将 [userscripts/copy-cleaner.user.js](userscripts/copy-cleaner.user.js) 的内容添加到 Tampermonkey 新脚本中。
+- 去除 AI 回复里的格式噪音
+- 把网页复制出来的公式 Unicode 乱码转回 LaTeX
+- 统一列表、表格、代码块、引用等 Markdown 输出
+- 兼容飞书对公式间距和嵌套列表缩进的要求
 
-#### 功能
+安装：
 
-| 功能                 | 示例输入           | 输出                                |
-| ------------------ | -------------- | --------------------------------- |
-| 去除加粗标记 `**`        | `**深度学习**是...` | `深度学习是...`                        |
-| 去除中文括号注释 `（）`      | `AI（人工智能）是...` | `AI是...`                          |
-| 去除中英文引号 `""''""''` | `"深度学习"是...`   | `深度学习是...`                        |
-| 数学公式提取为 LaTeX      | 渲染后的 ∇θ logπθ  | `$\nabla_\theta \log \pi_\theta$` |
-| 飞书空格兼容             | `公式$x^2$在这里`   | `公式 $x^2$ 在这里`                    |
+- 将 [userscripts/copy-cleaner.user.js](userscripts/copy-cleaner.user.js) 添加到 Tampermonkey
 
-#### 自动测试
+典型输出：
 
-启动好 `9222` 调试 Chrome 后，直接执行真实场景测试：
+| 输入 | 输出 |
+| --- | --- |
+| `**深度学习**是...` | `深度学习是...` |
+| `AI（人工智能）是...` | `AI是...` |
+| 渲染后的 `∇θ logπθ` | `$\nabla_\theta \log \pi_\theta$` |
+| `公式$x^2$在这里` | `公式 $x^2$ 在这里` |
+
+真实站点回归：
 
 ```bash
 npm run copycleaner:all
-```
 
-如需只跑单站，也可以直接执行：
-
-```bash
 npm run copycleaner:chatgpt
 npm run copycleaner:gemini
 npm run copycleaner:tika
 npm run copycleaner:aistudio
+
+npm run copycleaner:prompttest
 ```
 
-正确用法约束：
+关键约束：
 
-- `copycleaner:all` 是默认的完整真实站点回归入口。它会先做 **一次** Tampermonkey 同步，然后按 `chatgpt -> gemini -> tika -> aistudio` 串行回归。
-- 聚合入口里的子 runner 会自动带 `--skip-sync` 复用这次已同步状态，所以**不要**把 `--skip-sync` 当成冷启动命令单独使用；它只适合“前面已经成功做过一次同步”的场景。
-- 如果你是在受限沙箱里跑，`9222` 连接可能会被 `EPERM` 拦住；这时要改成提权运行，而不是怀疑 `copycleaner:all` 本身失效。
-- `copycleaner:realtest` 已废弃，不要再使用这个旧名字。
+- `copycleaner:all` 是默认入口，会先做一次 Tampermonkey 同步，再按 `chatgpt -> gemini -> tika -> aistudio` 串行回归。
+- 聚合入口内部会自动给子 runner 传 `--skip-sync` 复用这次同步；不要把 `--skip-sync` 当成冷启动命令单独使用。
+- `copycleaner:realtest` 已废弃。
+- 真实回归必须复用已经登录的 `9222` Chrome；不要另外启动一只空浏览器。
+- `json/list` 为空不代表不能跑，runner 会自动补普通 tab。
 
-完整回归会自动完成：
+完整回归会验证：
 
-1. 连接 `http://127.0.0.1:9222`
-2. 把本地 `userscripts/copy-cleaner.user.js` 同步进 Tampermonkey 一次
-3. 如果当前没有可复用网页页签，就在同一只 `9222` 浏览器里自动补一个 tab
-4. 按顺序打开各站点固定 fixture / 会话页
-5. 通过站点官方 copy 按钮或菜单触发 userscript 拦截
-6. 对比 page marker / 系统剪贴板与各站点 oracle 是否完全一致
+1. 本地 userscript 是否成功同步进 Tampermonkey
+2. 站点官方 copy 按钮/菜单是否走到脚本拦截链路
+3. 聚合串行回归是否能在同一只 `9222` 浏览器里稳定跑完
+4. page marker / 系统剪贴板是否与 oracle 完全一致
 
-这条命令比 `npm test` 更接近真实效果，因为它验证的是：
-
-1. 本地 userscript 是否真的成功同步进 Tampermonkey
-2. 各站点官方 copy 路径是否真的走到了脚本拦截链路
-3. 聚合串行回归是否能在同一只已登录 `9222` 浏览器里稳定跑完
-4. page marker / 系统剪贴板里的最终文本和标准答案是否完全一致
-
-查看当前内置真实 case：
+查看 case 或自定义运行：
 
 ```bash
 node automation/copy-cleaner-runner.js --list-cases
-```
 
-如果要自定义目标页面或断言文本，也可以直接运行：
-
-```bash
 node automation/copy-cleaner-runner.js \
   --site chatgpt \
   --case chatgpt-basic-cleanup \
@@ -122,35 +124,38 @@ node automation/copy-cleaner-runner.js \
   --expected 'AI公式在 $x^2$ 里'
 ```
 
-如果断言失败，脚本会输出 `firstDiffIndex`、`expectedFragment`、`actualFragment`，方便直接看剪贴板结果和标准答案从哪里开始不一致。
-
-新增站点时，推荐直接复用现有模式：
-
-1. 固定一个带代表性回复的真实会话页
-2. 先手工整理 oracle，明确“目标复制结果”而不是照抄当前脚本输出
-3. 新增 `automation/*-cases.cjs` 和 `automation/*-runner.js`
-4. 通过官方复制按钮触发 userscript 拦截，再比对系统剪贴板与 oracle
-5. 根据 diff 持续收敛站点专用适配和通用文本序列化逻辑
-
-***
-
 ## 开发
 
-### 安装依赖
+安装与测试：
 
 ```bash
 npm install
-```
-
-### 运行测试
-
-```bash
 npm test
 ```
 
-### 自动化调试
+当前已验证过的真实回归环境：
 
-启动 Chrome：
+- Node.js `v25.9.0`
+- npm `11.12.1`
+- Chrome `147.0.7727.x`
+- Playwright `@playwright/test@1.60.0-alpha-2026-05-01`
+- CDP `http://127.0.0.1:9222`
+
+说明：
+
+- 当前 Playwright 附着日常 Chrome 时需要 `connectOverCDP(..., { noDefaults: true })`，否则可能触发 `Browser.setDownloadBehavior` 兼容问题。
+
+### 9222 浏览器
+
+优先复用现有 `9222`：
+
+```bash
+curl -s http://127.0.0.1:9222/json/version
+```
+
+如果能返回版本信息，直接运行 runner。真正影响登录态的是 `9222` 对应的 browser profile，不是当前有没有普通 tab。
+
+如果本机还没有 `9222`，再启动一只可调试 Chrome。推荐先克隆当前 `Default` profile，再暴露 `9222`，避免丢失登录态：
 
 ```bash
 python3 - <<'PY'
@@ -194,44 +199,35 @@ PY
 agent-browser connect 9222
 ```
 
-说明：
+要点：
 
-- 该命令首次运行时会把 `~/Library/Application Support/Google/Chrome/Default` 克隆到 `~/.cache/agent-browser/chrome-9222-profile`，后续直接复用这个目录启动新 Chrome。
-- 这样能复用个人登录态，又不会和当前正在使用的主 Chrome profile 直接冲突，同时避免每次都重新全量复制 profile。
-- 如果想重新同步主 Chrome 的最新登录态或配置，先关闭这个 `9222` Chrome，再删除 `~/.cache/agent-browser/chrome-9222-profile` 后重新运行脚本。
+- 这样能复用登录态，又避免直接占用你正在使用的主 profile。
+- 如果要重新同步主 Chrome 的最新状态，先关闭这个 `9222` Chrome，再删除 `~/.cache/agent-browser/chrome-9222-profile` 后重跑。
+
+### 常见问题
+
+- `EPERM 127.0.0.1:9222`
+  常见于受限沙箱；改成提权运行。
+
+- `Browser.setDownloadBehavior` / `Browser context management is not supported`
+  是 Playwright 附着日常 Chrome 的兼容问题；保留 `noDefaults: true`。
+
+- `No existing page found`
+  当前 runner 会自动补普通 tab，优先检查 `9222` 是否真的可用。
+
+- 打开站点后跳登录页
+  不是 runner 逻辑问题，通常是 `9222` 对应 profile 没有登录态。
 
 ### 通用 Tampermonkey 同步
 
-- `lib/tampermonkey-cdp-utils.cjs` 提供了基于 CDP 的通用同步能力。
-- 推荐直接使用 CLI：
+CLI：
 
 ```bash
 npm run tampermonkey:sync -- --script-path userscripts/copy-cleaner.user.js
-```
-
-- 查看帮助：
-
-```bash
 npm run tampermonkey:sync -- --help
 ```
 
-`--help` 用法：
-
-```text
-Tampermonkey userscript sync CLI
-
-Usage:
-  node bin/tampermonkey-sync-cli.cjs --script-path <path> [options]
-
-Options:
-  --script-path <path>    Local userscript file to import into Tampermonkey
-  --cdp-url <url>         CDP endpoint URL or port alias (default: http://127.0.0.1:9222)
-  --extension-id <id>     Tampermonkey extension id (default: dhdgffkkebhmkfjojejmpbldmpobfkfo)
-  --json                  Print machine-readable JSON only
-  --help                  Show this message
-```
-
-也可以在 Node 脚本里直接导入高阶函数：
+Node API：
 
 ```js
 const { syncUserscriptToTampermonkey } = require('./index.js');
@@ -242,4 +238,4 @@ await syncUserscriptToTampermonkey({
 });
 ```
 
-- 当前 `automation/copy-cleaner-chatgpt-runner.js`、`automation/feishu-real-test-runner.js` 等真实站点验证脚本已直接复用这套统一同步入口。
+真实站点 runner 会直接复用这套同步入口。

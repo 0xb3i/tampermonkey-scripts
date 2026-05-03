@@ -47,6 +47,19 @@
     whiteboard: '白板',
     synced_reference: '引用块',
   };
+  var NON_TEXT_COMPONENT_TYPE_MAP = {
+    image: 'image',
+    callout: 'callout',
+    quote_container: 'quote',
+    code: 'code_block',
+    divider: 'divider',
+    grid: 'grid',
+    table: 'table',
+    bookmark: 'bookmark',
+    diagram: 'diagram',
+    whiteboard: 'whiteboard',
+    synced_reference: 'synced_reference',
+  };
   var runtimeDisposers = [];
   var lastDocxRecord = null;
   var lastCopyCapture = null;
@@ -435,6 +448,264 @@
     content = content || {};
     var markdownCount = (String(content.text || '').match(/!\[/g) || []).length;
     return markdownCount > 0 ? markdownCount : countDocumentImagesInHtml(content.html);
+  }
+
+  function summarizeComponentText(text, limit) {
+    var normalized = normalizePlainText(String(text || ''))
+      .replace(/\s+/g, ' ')
+      .trim();
+    if (!normalized) return '';
+    return normalized.slice(0, limit || 120);
+  }
+
+  function collectEquationComponentsFromText(text) {
+    var components = [];
+    splitLatexSegments(text).forEach(function (segment) {
+      if (!segment || segment.type !== 'formula' || !segment.value) return;
+      components.push({
+        type: 'equation',
+        textSample: summarizeComponentText(segment.value, 160),
+        rendered: true,
+      });
+    });
+    return components;
+  }
+
+  function collectBlockPlainText(block, depth) {
+    if (!block || depth > MAX_BLOCK_DEPTH || !block.record || !block.record.snapshot) return '';
+    var parts = [];
+    var snap = block.record.snapshot;
+    var text = decodeBlockText(snap);
+    if (text) parts.push(text);
+    getBlockChildren(block).forEach(function (child) {
+      var childText = collectBlockPlainText(child, depth + 1);
+      if (childText) parts.push(childText);
+    });
+    return parts.join('\n');
+  }
+
+  function buildRenderedImageSummary(image) {
+    var token = image && image.token ? String(image.token) : '';
+    var selector = token ? 'img[src*="' + token.replace(/["\\]/g, '\\$&') + '"]' : 'img';
+    var node = null;
+    try {
+      node = document.querySelector(selector);
+    } catch (e) {}
+    var width = node ? Number(node.naturalWidth || node.width || 0) : Number(image && image.width || 0);
+    var height = node ? Number(node.naturalHeight || node.height || 0) : Number(image && image.height || 0);
+    return {
+      rendered: width > 0 && height > 0,
+      width: width,
+      height: height,
+    };
+  }
+
+  function createSemanticSnapshot() {
+    return {
+      componentCounts: {},
+      components: [],
+      totalComponentCount: 0,
+      storedComponentCount: 0,
+    };
+  }
+
+  function pushSemanticComponent(snapshot, component) {
+    if (!snapshot || !component || !component.type) return;
+    var type = String(component.type || '');
+    snapshot.componentCounts[type] = (snapshot.componentCounts[type] || 0) + 1;
+    snapshot.totalComponentCount += 1;
+    if (snapshot.components.length >= 40) return;
+    snapshot.components.push(component);
+    snapshot.storedComponentCount = snapshot.components.length;
+  }
+
+  function collectSemanticSnapshotFromStructService() {
+    var summary = createSemanticSnapshot();
+    var ss = getStructService();
+    if (!ss || !ss.rootBlock) return summary;
+
+    function walk(block, depth) {
+      if (!block || depth > MAX_BLOCK_DEPTH || !block.record || !block.record.snapshot) return;
+      var snap = block.record.snapshot;
+      var rawType = String(snap.type || '');
+      var componentType = NON_TEXT_COMPONENT_TYPE_MAP[rawType] || '';
+
+      if (rawType === 'page') {
+        getBlockChildren(block).forEach(function (child) {
+          walk(child, depth + 1);
+        });
+        return;
+      }
+
+      if (rawType === 'callout' && !snap.background_color) {
+        var domStyle = extractCalloutStyleFromDOM(block.record.id);
+        if (domStyle.background_color) snap.background_color = domStyle.background_color;
+        if (domStyle.border_color) snap.border_color = domStyle.border_color;
+      }
+
+      if (componentType === 'image') {
+        var imageRender = buildRenderedImageSummary(snap.image || {});
+        pushSemanticComponent(summary, {
+          type: 'image',
+          textSample: summarizeComponentText((snap.image && snap.image.name) || '', 80),
+          rendered: imageRender.rendered,
+          width: imageRender.width,
+          height: imageRender.height,
+        });
+      } else if (componentType === 'table') {
+        var matrix = buildTableMatrix(snap, block, decodeBlockText, function (parts) {
+          return parts.join(' ').replace(/\s+/g, ' ').trim();
+        });
+        var cellTexts = [];
+        if (matrix && matrix.rows) {
+          matrix.rows.forEach(function (row) {
+            row.forEach(function (cell) {
+              var normalized = summarizeComponentText(cell, 80);
+              if (normalized) cellTexts.push(normalized);
+            });
+          });
+        }
+        pushSemanticComponent(summary, {
+          type: 'table',
+          rendered: true,
+          rowCount: matrix && matrix.rows ? matrix.rows.length : 0,
+          colCount: matrix && matrix.cols ? matrix.cols.length : 0,
+          cellTexts: cellTexts.slice(0, 6),
+          textSample: cellTexts[0] || '',
+        });
+      } else if (componentType === 'callout') {
+        pushSemanticComponent(summary, {
+          type: 'callout',
+          rendered: true,
+          textSample: summarizeComponentText(selectPrimaryCalloutContent(
+            decodeBlockText(snap),
+            collectBlockPlainText(block, depth + 1)
+          ), 160),
+        });
+      } else if (componentType === 'quote') {
+        pushSemanticComponent(summary, {
+          type: 'quote',
+          rendered: true,
+          textSample: summarizeComponentText(collectBlockPlainText(block, depth), 160),
+        });
+      } else if (componentType === 'code_block') {
+        pushSemanticComponent(summary, {
+          type: 'code_block',
+          rendered: true,
+          textSample: summarizeComponentText(decodeBlockText(snap), 160),
+        });
+      } else if (componentType === 'divider') {
+        pushSemanticComponent(summary, {
+          type: 'divider',
+          rendered: true,
+          textSample: '',
+        });
+      } else if (componentType === 'grid') {
+        var columnCount = getBlockChildren(block).filter(function (child) {
+          return child && child.record && child.record.snapshot && child.record.snapshot.type === 'grid_column';
+        }).length;
+        pushSemanticComponent(summary, {
+          type: 'grid',
+          rendered: true,
+          colCount: columnCount,
+          textSample: summarizeComponentText(collectBlockPlainText(block, depth), 160),
+        });
+      } else if (componentType) {
+        pushSemanticComponent(summary, {
+          type: componentType,
+          rendered: true,
+          textSample: summarizeComponentText(collectBlockPlainText(block, depth), 160),
+        });
+      }
+
+      collectEquationComponentsFromText(decodeBlockText(snap)).forEach(function (component) {
+        pushSemanticComponent(summary, component);
+      });
+
+      getBlockChildren(block).forEach(function (child) {
+        walk(child, depth + 1);
+      });
+    }
+
+    walk(ss.rootBlock, 0);
+    return summary;
+  }
+
+  function collectSemanticSnapshotFromDomFallback() {
+    var summary = createSemanticSnapshot();
+    var root = getContentRootElement() || document.querySelector(EDITABLE_SELECTOR);
+    if (!root) return summary;
+
+    Array.prototype.slice.call(root.querySelectorAll('img'), 0, 12).forEach(function (img) {
+      pushSemanticComponent(summary, {
+        type: 'image',
+        rendered: Number(img.naturalWidth || img.width || 0) > 0 && Number(img.naturalHeight || img.height || 0) > 0,
+        width: Number(img.naturalWidth || img.width || 0),
+        height: Number(img.naturalHeight || img.height || 0),
+        textSample: summarizeComponentText(img.alt || '', 80),
+      });
+    });
+
+    Array.prototype.slice.call(root.querySelectorAll('table'), 0, 8).forEach(function (table) {
+      var rows = Array.from(table.querySelectorAll('tr'));
+      var firstRow = rows[0] ? Array.from(rows[0].querySelectorAll('th,td')) : [];
+      var cellTexts = Array.from(table.querySelectorAll('th,td')).map(function (cell) {
+        return summarizeComponentText(cell.textContent || '', 80);
+      }).filter(Boolean).slice(0, 6);
+      pushSemanticComponent(summary, {
+        type: 'table',
+        rendered: true,
+        rowCount: rows.length,
+        colCount: firstRow.length,
+        cellTexts: cellTexts,
+        textSample: cellTexts[0] || '',
+      });
+    });
+
+    Array.prototype.slice.call(root.querySelectorAll('blockquote'), 0, 8).forEach(function (node) {
+      pushSemanticComponent(summary, {
+        type: 'quote',
+        rendered: true,
+        textSample: summarizeComponentText(node.textContent || '', 160),
+      });
+    });
+
+    Array.prototype.slice.call(root.querySelectorAll('pre'), 0, 8).forEach(function (node) {
+      pushSemanticComponent(summary, {
+        type: 'code_block',
+        rendered: true,
+        textSample: summarizeComponentText(node.textContent || '', 160),
+      });
+    });
+
+    Array.prototype.slice.call(root.querySelectorAll('hr'), 0, 8).forEach(function () {
+      pushSemanticComponent(summary, {
+        type: 'divider',
+        rendered: true,
+        textSample: '',
+      });
+    });
+
+    Array.prototype.slice.call(root.querySelectorAll('math, mjx-container, [data-latex], .katex, [class*="equation"], [class*="formula"]'), 0, 12).forEach(function (node) {
+      pushSemanticComponent(summary, {
+        type: 'equation',
+        rendered: true,
+        textSample: summarizeComponentText(
+          node.getAttribute('data-latex') || node.textContent || '',
+          160
+        ),
+      });
+    });
+
+    return summary;
+  }
+
+  function collectSemanticSnapshot() {
+    var ss = getStructService();
+    if (ss && ss.rootBlock) {
+      return collectSemanticSnapshotFromStructService();
+    }
+    return collectSemanticSnapshotFromDomFallback();
   }
 
   function buildTableMatrix(snap, block, extractor, joinParts) {
@@ -2555,6 +2826,7 @@
       textLength: Number(snap.textLength || 0),
       htmlLength: Number(snap.htmlLength || 0),
       styleSummary: snap.styleSummary || null,
+      semanticSnapshot: snap.semanticSnapshot || null,
     });
   }
 
@@ -2570,6 +2842,7 @@
       htmlLen: Number(result && result.htmlLen || 0),
       clipboardHtmlLen: Number(result && result.clipboardHtmlLen || 0),
       payloadError: Boolean(result && result.payloadError),
+      semanticSnapshot: result && result.semanticSnapshot || null,
       ts: Date.now(),
     }, extra || {}));
   }
@@ -3115,6 +3388,10 @@
 
         var docTitle = getDocumentTitle();
         buildClipboardPayload(content).then(function (payload) {
+          var validationSnapshot = captureValidationSnapshot();
+          var semanticSnapshot = validationSnapshot && validationSnapshot.semanticSnapshot
+            ? validationSnapshot.semanticSnapshot
+            : null;
           var hasDowngradedImages = !!(payload && payload.hasDowngradedImages) || /data-feishu-downgraded-images="true"/i.test(String(payload && payload.html || ''));
           var hasImagesToInject = !!(payload && payload.hasImagesToInject);
           var orderedImageBase64List = (payload && payload.orderedImageBase64List) || [];
@@ -3135,6 +3412,7 @@
             hasImagesToInject: hasImagesToInject,
             hasImagesToUpload: !!(payload && payload.hasImagesToUpload),
             orderedImageBase64List: orderedImageBase64List,
+            semanticSnapshot: semanticSnapshot,
             originalDocxRecordObj: payload && payload.originalDocxRecordObj ? payload.originalDocxRecordObj : null,
           }).then(function () {
             var imgCount = countExtractedImages(content);
@@ -3155,6 +3433,7 @@
               hasDowngradedImages: hasDowngradedImages,
               hasImagesToInject: hasImagesToInject,
               imageInjectCount: orderedImageBase64List.length,
+              semanticSnapshot: semanticSnapshot,
               extractionDebug: content.extractionDebug || getLastExtractionDebug(),
             };
             syncExtractionResultToDom(result, {
@@ -3166,7 +3445,16 @@
             resolve(result);
           });
         }).catch(function () {
-          setPendingPaste({ html: content.html, text: content.text, title: docTitle }).then(function () {
+          var fallbackValidationSnapshot = captureValidationSnapshot();
+          var fallbackSemanticSnapshot = fallbackValidationSnapshot && fallbackValidationSnapshot.semanticSnapshot
+            ? fallbackValidationSnapshot.semanticSnapshot
+            : null;
+          setPendingPaste({
+            html: content.html,
+            text: content.text,
+            title: docTitle,
+            semanticSnapshot: fallbackSemanticSnapshot,
+          }).then(function () {
             var imgCount = countExtractedImages(content);
             showToast('⚠️ 内容已提取，但图片预处理失败，粘贴时可能退回纯文本 · ' + imgCount + ' 图片', 3500);
             var result = {
@@ -3179,6 +3467,7 @@
               htmlLen: String(content.html || '').length,
               clipboardHtmlLen: 0,
               payloadError: true,
+              semanticSnapshot: fallbackSemanticSnapshot,
               extractionDebug: content.extractionDebug || getLastExtractionDebug(),
             };
             syncExtractionResultToDom(result);
@@ -3206,6 +3495,7 @@
         htmlLen: String(pending.html || '').length,
         clipboardHtmlLen: String(pending.clipboardHtml || '').length,
         hasDowngradedImages: Boolean(pending.hasDowngradedImages),
+        semanticSnapshot: pending.semanticSnapshot || null,
         ts: Number(pending.ts || 0),
       };
     });
@@ -3215,7 +3505,7 @@
     return lastPendingPasteTimestamp;
   }
 
-  function buildRealTestDuplicateDocumentSummary() {
+  function buildValidateDuplicateDocumentSummary() {
     return duplicateDocumentForAutomation().then(function (summary) {
       return summarizePendingPasteForAutomation().then(function (pendingPaste) {
         var result = {};
@@ -3225,6 +3515,7 @@
         });
         if (validationSnapshot) {
           result.validationSnapshot = validationSnapshot;
+          result.semanticSnapshot = validationSnapshot.semanticSnapshot || null;
         }
         if (pendingPaste) {
           result.pendingPaste = pendingPaste;
@@ -3289,6 +3580,7 @@
       equationCount: Number(content.equationCount || 0),
       extractionDebug: content.extractionDebug || getLastExtractionDebug(),
       styleSummary: collectValidationStyleSummary(),
+      semanticSnapshot: collectSemanticSnapshot(),
     };
     // Sync to DOM for cross-context visibility (AppleScript JS context).
     syncValidationSnapshotToDom(snap);
@@ -3362,7 +3654,7 @@
   function runAutomationAction(action) {
     var handlers = {
       duplicateDocument: duplicateDocumentForAutomation,
-      realTestDuplicateDocument: buildRealTestDuplicateDocumentSummary,
+      validateDuplicateDocument: buildValidateDuplicateDocumentSummary,
     };
     var handler = handlers[String(action || '')];
     if (!handler) {
@@ -4053,8 +4345,16 @@
 
       if (hasImagesToUpload) {
         showToast('⏳ 上传图片中...', 0);
-        uploadAllImages(content.orderedImageBase64List).then(function (tokenMap) {
-          var uploadedCount = Object.keys(tokenMap).length;
+        uploadAllImages(content.orderedImageBase64List).then(function (uploadSummary) {
+          var tokenMap = uploadSummary && uploadSummary.tokenMap ? uploadSummary.tokenMap : {};
+          var uploadedCount = Number(uploadSummary && uploadSummary.uploadedCount || 0);
+          var failedCount = Number(uploadSummary && uploadSummary.failedCount || 0);
+          setDocumentJsonAttribute('data-feishu-upload-result', {
+            tokenMap: tokenMap,
+            uploadedCount: uploadedCount,
+            failedCount: failedCount,
+            attemptedCount: Number(uploadSummary && uploadSummary.attemptedCount || 0),
+          });
           if (uploadedCount > 0) {
             Object.keys(tokenMap).forEach(function (key) {
               _uploadedTokenMap[key] = tokenMap[key];
@@ -4068,12 +4368,12 @@
               content.hasImagesToInject = false;
               content.hasImagesToUpload = false;
               return setPendingPaste(content).then(function () {
-                showToast('✅ ' + uploadedCount + ' 张图片已上传', 1500);
+                showToast('✅ ' + uploadedCount + ' 张图片已上传' + (failedCount ? '，失败 ' + failedCount + ' 张' : ''), 1500);
                 doPaste(content);
               });
             }
           }
-          showToast('✅ ' + uploadedCount + ' 张图片已上传', 1500);
+          showToast('✅ ' + uploadedCount + ' 张图片已上传' + (failedCount ? '，失败 ' + failedCount + ' 张' : ''), 1500);
           doPaste(content);
         }).catch(function () {
           showToast('⚠️ 图片上传失败，将粘贴不含图片的内容', 3000);
@@ -4500,10 +4800,15 @@
     });
   }
 
-  // Upload all base64 images and return token mapping (oldToken → newToken)
+  // Upload all base64 images and return upload summary plus token mapping.
   function uploadAllImages(orderedImageBase64List) {
     if (!orderedImageBase64List || !orderedImageBase64List.length) {
-      return Promise.resolve({});
+      return Promise.resolve({
+        tokenMap: {},
+        attemptedCount: 0,
+        uploadedCount: 0,
+        failedCount: 0,
+      });
     }
 
     // First, discover the upload API (also resolves obj_token for wiki pages)
@@ -4517,6 +4822,8 @@
 
       // Upload each image sequentially to avoid overwhelming the server
       var tokenMap = {};
+      var uploadedCount = 0;
+      var failedCount = 0;
       var chain = Promise.resolve();
       var total = orderedImageBase64List.length;
 
@@ -4530,20 +4837,46 @@
         }).then(function (result) {
           if (result.token) {
             tokenMap[img.token] = result.token;
+            uploadedCount += 1;
+          } else {
+            failedCount += 1;
           }
           try {
             document.documentElement.setAttribute('data-feishu-upload-progress',
-              JSON.stringify({ index: index, total: total, oldToken: img.token, newToken: result.token || '', error: result.error || '' }));
+              JSON.stringify({
+                index: index,
+                total: total,
+                oldToken: img.token,
+                newToken: result.token || '',
+                error: result.error || '',
+                uploadedCount: uploadedCount,
+                failedCount: failedCount,
+              }));
           } catch (e) {}
         }).catch(function (err) {
+          failedCount += 1;
           try {
             document.documentElement.setAttribute('data-feishu-upload-progress',
-              JSON.stringify({ index: index, total: total, oldToken: img.token, error: String(err) }));
+              JSON.stringify({
+                index: index,
+                total: total,
+                oldToken: img.token,
+                error: String(err),
+                uploadedCount: uploadedCount,
+                failedCount: failedCount,
+              }));
           } catch (e) {}
         });
       });
 
-      return chain.then(function () { return tokenMap; });
+      return chain.then(function () {
+        return {
+          tokenMap: tokenMap,
+          attemptedCount: total,
+          uploadedCount: uploadedCount,
+          failedCount: failedCount,
+        };
+      });
     });
   }
 
@@ -5236,12 +5569,16 @@
         });
         return;
       }
-      uploadAllImages(images).then(function (tokenMap) {
+      uploadAllImages(images).then(function (uploadSummary) {
+        var tokenMap = uploadSummary && uploadSummary.tokenMap ? uploadSummary.tokenMap : {};
         // Directly populate _uploadedTokenMap so the paste flow can use it
         // without waiting for the runner to echo it back
         setDocumentJsonAttribute('data-feishu-upload-result', {
           tokenMap: tokenMap,
           count: mergeUploadedTokenMap(tokenMap),
+          uploadedCount: Number(uploadSummary && uploadSummary.uploadedCount || 0),
+          failedCount: Number(uploadSummary && uploadSummary.failedCount || 0),
+          attemptedCount: Number(uploadSummary && uploadSummary.attemptedCount || images.length),
         });
       }).catch(function (err) {
         setDocumentJsonAttribute('data-feishu-upload-result', {
@@ -5267,7 +5604,8 @@
           });
           return;
         }
-        uploadAllImages(images).then(function (tokenMap) {
+        uploadAllImages(images).then(function (uploadSummary) {
+          var tokenMap = uploadSummary && uploadSummary.tokenMap ? uploadSummary.tokenMap : {};
           var mergedCount = mergeUploadedTokenMap(tokenMap);
           // Also update the pendingPaste docxRecord with new tokens
           // so the next Cmd+Shift+P paste uses the valid tokens.
@@ -5281,6 +5619,9 @@
               setDocumentJsonAttribute('data-feishu-upload-result', {
                 tokenMap: tokenMap,
                 count: mergedCount,
+                uploadedCount: Number(uploadSummary && uploadSummary.uploadedCount || 0),
+                failedCount: Number(uploadSummary && uploadSummary.failedCount || 0),
+                attemptedCount: Number(uploadSummary && uploadSummary.attemptedCount || images.length),
                 pendingUpdated: true,
               });
             });
@@ -5288,6 +5629,9 @@
           setDocumentJsonAttribute('data-feishu-upload-result', {
             tokenMap: tokenMap,
             count: mergedCount,
+            uploadedCount: Number(uploadSummary && uploadSummary.uploadedCount || 0),
+            failedCount: Number(uploadSummary && uploadSummary.failedCount || 0),
+            attemptedCount: Number(uploadSummary && uploadSummary.attemptedCount || images.length),
           });
         }).catch(function (err) {
           setDocumentJsonAttribute('data-feishu-upload-result', {
@@ -5947,7 +6291,7 @@
         requestEvent: AUTOMATION_REQUEST_EVENT,
         resultEvent: AUTOMATION_RESULT_EVENT,
         defaultAction: 'duplicateDocument',
-        actions: ['duplicateDocument', 'realTestDuplicateDocument'],
+        actions: ['duplicateDocument', 'validateDuplicateDocument'],
       },
       exports: {
         extractFullDoc: typeof FeishuHelperModules.extraction.extractFullDoc,

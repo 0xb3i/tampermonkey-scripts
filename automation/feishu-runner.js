@@ -3,8 +3,16 @@
 const { resolve } = require('path');
 
 const {
+  DEFAULT_CASE_ID,
+  getFeishuCase,
+  listFeishuCases,
+} = require('./feishu-cases.cjs');
+const {
   buildSnapshotSignature,
 } = require('../lib/feishu-paste-fallback-utils.cjs');
+const {
+  assertFeishuCaseResult,
+} = require('../lib/feishu-assertions.cjs');
 const {
   DEFAULT_CDP_ENDPOINT,
   connectToChromeOverCDP,
@@ -14,7 +22,7 @@ const {
 } = require('../lib/tampermonkey-cdp-utils.cjs');
 
 const DEFAULT_SCRIPT_PATH = resolve(__dirname, '../userscripts/feishu-helper.user.js');
-const DEFAULT_ACTION = 'realTestDuplicateDocument';
+const DEFAULT_ACTION = 'validateDuplicateDocument';
 const DEFAULT_TIMEOUT_MS = 45000;
 const DEFAULT_SHORT_WAIT_MS = 1200;
 const FEISHU_DOC_HOST_RE = /(^|\.)((feishu\.cn)|(larksuite\.com)|(larkoffice\.com))$/i;
@@ -92,7 +100,7 @@ async function runAutomationActionInPage(page, action, timeoutMs) {
   return page.evaluate(function (payload) {
     return new Promise(function (resolve, reject) {
       var timeoutId = 0;
-      var requestId = 'feishu-real-test-' + Date.now() + '-' + Math.random().toString(16).slice(2);
+      var requestId = 'feishu-test-' + Date.now() + '-' + Math.random().toString(16).slice(2);
 
       function cleanup() {
         if (timeoutId) clearTimeout(timeoutId);
@@ -335,51 +343,53 @@ function assertAutomationResult(result, artifacts) {
   }
 }
 
-async function main() {
-  var args = parseCliArgs(process.argv.slice(2));
-  var endpointUrl = args['cdp-url'] || DEFAULT_CDP_ENDPOINT;
-  var scriptPath = resolve(args['script-path'] || DEFAULT_SCRIPT_PATH);
-  var action = args.action || DEFAULT_ACTION;
-  var timeoutMs = Number(args.timeout || DEFAULT_TIMEOUT_MS);
-  var sourceUrl = args['source-url'] || '';
-  var targetUrl = args['target-url'] || args.url || '';
-
+async function runFeishuTest(options) {
+  var config = options || {};
+  var selectedCase = getFeishuCase(config.caseId || DEFAULT_CASE_ID);
+  var endpointUrl = config.cdpUrl || DEFAULT_CDP_ENDPOINT;
+  var scriptPath = resolve(config.scriptPath || DEFAULT_SCRIPT_PATH);
+  var action = config.action || selectedCase.action || DEFAULT_ACTION;
+  var timeoutMs = Number(config.timeout || DEFAULT_TIMEOUT_MS);
+  var sourceUrl = config.sourceUrl || selectedCase.sourceUrl || '';
+  var targetUrl = config.targetUrl || config.url || selectedCase.targetUrl || '';
   var browser = await connectToChromeOverCDP(endpointUrl);
   try {
     var page = null;
-    console.log('[feishu-real-test-runner] sync:start');
+    console.log('[feishu-runner] sync:start');
     var syncStep = await syncUserscriptInBrowser(browser, {
       scriptPath: scriptPath,
     });
     page = syncStep.page;
     var originalUrl = syncStep.previousUrl;
     var sync = syncStep.sync;
-    console.log('[feishu-real-test-runner] sync:done');
+    console.log('[feishu-runner] sync:done');
 
-    console.log('[feishu-real-test-runner] source:prepare');
+    console.log('[feishu-runner] source:prepare');
     var sourcePageUrl = await ensureFeishuDocumentPage(page, sourceUrl || originalUrl);
     var sourceHelper = await waitForFeishuHelperReady(page, timeoutMs);
-    console.log('[feishu-real-test-runner] source:ready');
+    console.log('[feishu-runner] source:ready');
 
-    console.log('[feishu-real-test-runner] source:extract:start');
+    console.log('[feishu-runner] source:extract:start');
     var extraction = await runAutomationActionInPage(page, action, timeoutMs);
     var sourceArtifacts = await readAutomationArtifacts(page);
     assertAutomationResult(extraction, sourceArtifacts);
-    console.log('[feishu-real-test-runner] source:extract:done');
+    console.log('[feishu-runner] source:extract:done');
 
-    console.log('[feishu-real-test-runner] target:prepare');
+    console.log('[feishu-runner] target:prepare');
     var targetPageUrl = await ensureFeishuDocumentPage(page, targetUrl);
     var targetHelper = await waitForFeishuHelperReady(page, timeoutMs);
-    console.log('[feishu-real-test-runner] target:ready');
+    console.log('[feishu-runner] target:ready');
 
-    console.log('[feishu-real-test-runner] target:paste:start');
+    console.log('[feishu-runner] target:paste:start');
     var targetValidation = await runTargetPasteValidation(page, {
       timeoutMs: timeoutMs,
     });
     var targetArtifacts = await readAutomationArtifacts(page);
-    console.log('[feishu-real-test-runner] target:paste:done');
+    console.log('[feishu-runner] target:paste:done');
 
-    console.log(JSON.stringify({
+    var result = {
+      caseId: selectedCase.id,
+      caseDescription: selectedCase.description,
       sync: sync,
       source: {
         pageUrl: sourcePageUrl,
@@ -394,7 +404,15 @@ async function main() {
         artifacts: targetArtifacts,
       },
       previousUrl: originalUrl,
-    }, null, 2));
+    };
+
+    assertFeishuCaseResult({
+      testCase: selectedCase,
+      source: result.source,
+      target: result.target,
+    });
+
+    return result;
   } finally {
     await browser.close();
   }
@@ -405,12 +423,28 @@ module.exports = {
   isFeishuDocUrl: isFeishuDocUrl,
   parseCliArgs: parseCliArgs,
   runAutomationActionInPage: runAutomationActionInPage,
+  runFeishuTest: runFeishuTest,
   waitForFeishuHelperReady: waitForFeishuHelperReady,
 };
 
 if (require.main === module) {
-  main().catch(function (error) {
-    console.error('[feishu-real-test-runner] failed:', error && error.stack ? error.stack : error);
-    process.exitCode = 1;
-  });
+  var args = parseCliArgs(process.argv.slice(2));
+  if (args['list-cases']) {
+    console.log(JSON.stringify(listFeishuCases(), null, 2));
+  } else {
+    runFeishuTest({
+      caseId: args.case || DEFAULT_CASE_ID,
+      cdpUrl: args['cdp-url'] || DEFAULT_CDP_ENDPOINT,
+      scriptPath: args['script-path'] || DEFAULT_SCRIPT_PATH,
+      sourceUrl: args['source-url'],
+      targetUrl: args['target-url'] || args.url,
+      action: args.action || DEFAULT_ACTION,
+      timeout: Number(args.timeout || DEFAULT_TIMEOUT_MS),
+    }).then(function (result) {
+      console.log(JSON.stringify(result, null, 2));
+    }).catch(function (error) {
+      console.error('[feishu-runner] failed:', error && error.stack ? error.stack : error);
+      process.exitCode = 1;
+    });
+  }
 }
