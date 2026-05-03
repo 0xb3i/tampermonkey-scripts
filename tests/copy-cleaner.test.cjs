@@ -171,6 +171,52 @@ test('copy cleaner selection payload preserves nested ordered lists for structur
   );
 });
 
+test('copy cleaner selection payload normalizes nested unordered lists for Feishu-friendly indentation', () => {
+  const { buildClipboardPayloadFromSelection } = loadCopyCleanerExports();
+  const fragment = createFragment([
+    createElement('UL', [
+      createElement('LI', [
+        createElement('P', [createTextNode('第一项')]),
+      ]),
+      createElement('LI', [
+        createElement('P', [createTextNode('第二项')]),
+        createElement('UL', [
+          createElement('LI', [
+            createElement('P', [createTextNode('子项 2.1')]),
+          ]),
+          createElement('LI', [
+            createElement('P', [createTextNode('子项 2.2')]),
+          ]),
+        ]),
+      ]),
+    ]),
+  ]);
+  const payload = buildClipboardPayloadFromSelection({
+    isCollapsed: false,
+    rangeCount: 1,
+    toString: function () { return '第一项第二项子项 2.1子项 2.2'; },
+    getRangeAt: function () {
+      return {
+        startContainer: createTextNode('第一项'),
+        endContainer: createTextNode('子项 2.2'),
+        cloneRange: function () { return this; },
+        cloneContents: function () { return fragment; },
+      };
+    },
+  });
+
+  assert.ok(payload);
+  assert.equal(
+    payload.text,
+    [
+      '- 第一项',
+      '- 第二项',
+      '    - 子项 2.1',
+      '    - 子项 2.2',
+    ].join('\n')
+  );
+});
+
 test('copy cleaner keeps indentation for plain code copied through clipboard text path', () => {
   const { normalizeClipboardText } = loadCopyCleanerExports();
   const code = 'def foo():\n    x = 1\n\n    if x:\n        print(x)';
@@ -244,6 +290,28 @@ test('copy cleaner inserts a blank line after markdown tables for Feishu renderi
       '| 张三 | 开发 | 已完成 |',
       '',
       '下面是一段包含图片语法的文本：',
+    ].join('\n')
+  );
+});
+
+test('copy cleaner normalizes nested list indentation to four-space steps for Feishu rendering', () => {
+  const { normalizeStructuredMarkdownForPaste } = loadCopyCleanerExports();
+  assert.equal(
+    normalizeStructuredMarkdownForPaste([
+      '- 一级无序项',
+      '  - 二级无序项',
+      '    - 三级无序项',
+      '1. 一级有序项',
+      '  - 有序项下的无序子项',
+      '   1. 有序项下的有序子项',
+    ].join('\n')),
+    [
+      '- 一级无序项',
+      '    - 二级无序项',
+      '        - 三级无序项',
+      '1. 一级有序项',
+      '    - 有序项下的无序子项',
+      '    1. 有序项下的有序子项',
     ].join('\n')
   );
 });

@@ -206,7 +206,9 @@
 
   function normalizeStructuredMarkdownForPaste(text) {
     var lines = compactNonTableBlankLines(
-      normalizeInlineLatexSpacing(String(text || '').replace(/\r\n?/g, '\n'))
+      normalizeNestedListIndentation(
+        normalizeInlineLatexSpacing(String(text || '').replace(/\r\n?/g, '\n'))
+      )
     ).split('\n');
     var result = [];
     function isTableLine(line) {
@@ -256,6 +258,53 @@
       }
     }
     return result;
+  }
+
+  function normalizeNestedListIndentationOutsideCode(text) {
+    var lines = String(text || '').split('\n');
+    var positiveIndentWidths = [];
+
+    for (var i = 0; i < lines.length; i++) {
+      var probeLine = lines[i];
+      var probeQuoteMatch = probeLine.match(/^((?:>\s*)*)/);
+      var probeContent = probeLine.slice(probeQuoteMatch ? probeQuoteMatch[1].length : 0);
+      var probeListMatch = probeContent.match(/^([ \t]*)([-+*]|\d+\.)(\s+)(.*)$/);
+      if (!probeListMatch) continue;
+      var probeIndentWidth = probeListMatch[1].replace(/\t/g, '    ').length;
+      if (probeIndentWidth > 0) positiveIndentWidths.push(probeIndentWidth);
+    }
+
+    var baseIndentWidth = positiveIndentWidths.length
+      ? Math.min.apply(null, positiveIndentWidths)
+      : 0;
+
+    for (var j = 0; j < lines.length; j++) {
+      var line = lines[j];
+      var quoteMatch = line.match(/^((?:>\s*)*)/);
+      var quotePrefix = quoteMatch ? quoteMatch[1] : '';
+      var content = line.slice(quotePrefix.length);
+      var listMatch = content.match(/^([ \t]*)([-+*]|\d+\.)(\s+)(.*)$/);
+      if (!listMatch) continue;
+
+      var indentWidth = listMatch[1].replace(/\t/g, '    ').length;
+      if (indentWidth === 0) {
+        lines[j] = quotePrefix + listMatch[2] + listMatch[3] + listMatch[4];
+        continue;
+      }
+
+      var nestingDepth = Math.max(1, Math.floor(indentWidth / (baseIndentWidth || indentWidth)));
+      lines[j] = quotePrefix + new Array(nestingDepth * 4 + 1).join(' ') + listMatch[2] + listMatch[3] + listMatch[4];
+    }
+
+    return lines.join('\n');
+  }
+
+  function normalizeNestedListIndentation(text) {
+    var parts = String(text || '').split(/(```[\s\S]*?```)/g);
+    for (var i = 0; i < parts.length; i += 2) {
+      parts[i] = normalizeNestedListIndentationOutsideCode(parts[i]);
+    }
+    return parts.join('');
   }
 
   function normalizeAiStudioMarkdownForPaste(text) {
@@ -1454,11 +1503,11 @@
       if (hasMath) {
         extractLatexFromFragment(fragment);
         var mathText = extractFragmentText(fragment, fragment.textContent);
-        return { text: hasStructured ? mathText : cleanText(mathText) };
+        return { text: hasStructured ? normalizeStructuredMarkdownForPaste(mathText) : cleanText(mathText) };
       }
       if (hasStructured) {
         var structuredText = extractFragmentText(fragment, rawText);
-        return structuredText !== rawText ? { text: structuredText } : null;
+        return structuredText !== rawText ? { text: normalizeStructuredMarkdownForPaste(structuredText) } : null;
       }
     }
 
