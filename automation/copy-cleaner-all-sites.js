@@ -2,6 +2,11 @@
 
 const { spawn } = require('child_process');
 
+const {
+  DEFAULT_CDP_ENDPOINT,
+  connectToChromeOverCDP,
+  syncUserscriptInBrowser,
+} = require('../lib/tampermonkey-cdp-utils.cjs');
 const { parseCliArgs } = require('./copy-cleaner-runner.js');
 
 const DEFAULT_SITES = ['chatgpt', 'gemini', 'tika', 'aistudio'];
@@ -43,8 +48,24 @@ function buildRunnerCommand(site, args) {
   if (args && args['script-path']) {
     commandArgs.push('--script-path', String(args['script-path']));
   }
+  if (args && args['skip-sync']) {
+    commandArgs.push('--skip-sync');
+  }
 
   return commandArgs;
+}
+
+async function defaultSyncScript(args) {
+  var runtimeArgs = args || {};
+  var endpointUrl = runtimeArgs['cdp-url'] ? String(runtimeArgs['cdp-url']) : DEFAULT_CDP_ENDPOINT;
+  var browser = await connectToChromeOverCDP(endpointUrl);
+  try {
+    return await syncUserscriptInBrowser(browser, {
+      scriptPath: runtimeArgs['script-path'],
+    });
+  } finally {
+    await browser.close();
+  }
 }
 
 function spawnRunner(commandArgs) {
@@ -72,14 +93,22 @@ function spawnRunner(commandArgs) {
 async function runAllSites(args, options) {
   var runtimeOptions = options || {};
   var logger = runtimeOptions.logger || console;
+  var syncScript = runtimeOptions.syncScript || defaultSyncScript;
   var runCommand = runtimeOptions.runCommand || function (_site, commandArgs) {
     return spawnRunner(commandArgs);
   };
-  var sites = resolveSites(args || {});
+  var runnerArgs = Object.assign({}, args || {}, { 'skip-sync': true });
+  var sites = resolveSites(runnerArgs);
+
+  if (!(args && args['skip-sync'])) {
+    logger.log('[copy-cleaner-all-sites] sync:start');
+    await syncScript(args || {});
+    logger.log('[copy-cleaner-all-sites] sync:done');
+  }
 
   for (var index = 0; index < sites.length; index += 1) {
     var site = sites[index];
-    var commandArgs = buildRunnerCommand(site, args || {});
+    var commandArgs = buildRunnerCommand(site, runnerArgs);
     logger.log('[copy-cleaner-all-sites] site:start ' + site);
     await runCommand(site, commandArgs);
     logger.log('[copy-cleaner-all-sites] site:done ' + site);
@@ -93,6 +122,7 @@ async function runAllSites(args, options) {
 module.exports = {
   DEFAULT_SITES: DEFAULT_SITES,
   buildRunnerCommand: buildRunnerCommand,
+  defaultSyncScript: defaultSyncScript,
   resolveSites: resolveSites,
   runAllSites: runAllSites,
   spawnRunner: spawnRunner,

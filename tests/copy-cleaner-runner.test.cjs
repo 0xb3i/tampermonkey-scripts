@@ -273,6 +273,117 @@ test('readClipboardTextWithFocus retries clipboard read after recovering focus',
   ]);
 });
 
+test('runCopyCleanerRealTest skips tampermonkey sync when skipSync is enabled', async () => {
+  const runnerPath = require.resolve('../automation/copy-cleaner-runner.js');
+  const utilsPath = require.resolve('../lib/tampermonkey-cdp-utils.cjs');
+  const originalRunnerModule = require.cache[runnerPath];
+  const originalUtilsModule = require.cache[utilsPath];
+  const syncCalls = [];
+
+  const page = {
+    currentUrl: 'about:blank',
+    url: function () {
+      return this.currentUrl;
+    },
+    bringToFront: async function () {},
+    goto: async function (url) {
+      this.currentUrl = url;
+    },
+    waitForLoadState: async function () {},
+    reload: async function () {},
+    waitForTimeout: async function () {},
+    evaluate: async function (fn, arg) {
+      const source = String(fn);
+      if (arg === 'data-copy-cleaner-chatgpt-copy') {
+        return 'expected output';
+      }
+      if (source.includes('navigator.clipboard.readText')) {
+        return 'expected output';
+      }
+      return null;
+    },
+  };
+  const context = {
+    pages: function () {
+      return [page];
+    },
+    grantPermissions: async function () {},
+    newPage: async function () {
+      return page;
+    },
+  };
+  const browser = {
+    close: async function () {},
+    contexts: function () {
+      return [context];
+    },
+  };
+
+  require.cache[utilsPath] = {
+    id: utilsPath,
+    filename: utilsPath,
+    loaded: true,
+    exports: {
+      DEFAULT_CDP_ENDPOINT: 'http://127.0.0.1:9222',
+      connectToChromeOverCDP: async function () {
+        return browser;
+      },
+      getPrimaryContext: function () {
+        return context;
+      },
+      getPrimaryPage: async function () {
+        return page;
+      },
+      navigateCurrentTab: async function (targetPage, url) {
+        targetPage.currentUrl = url;
+      },
+      syncUserscriptInBrowser: async function () {
+        syncCalls.push('sync');
+        return {
+          page: page,
+          previousUrl: 'chrome-extension://tampermonkey/options.html',
+          sync: { name: '复制净化器' },
+        };
+      },
+    },
+  };
+  delete require.cache[runnerPath];
+
+  try {
+    const runner = require('../automation/copy-cleaner-runner.js');
+    const originalAdapter = Object.assign({}, runner.ADAPTERS.chatgpt);
+    runner.ADAPTERS.chatgpt.waitForReply = async function () {};
+    runner.ADAPTERS.chatgpt.clickCopy = async function () {
+      return { action: 'copy' };
+    };
+    runner.ADAPTERS.chatgpt.navigateToPage = async function (_context, targetPage, url) {
+      targetPage.currentUrl = url;
+      return targetPage;
+    };
+
+    try {
+      const result = await runner.runCopyCleanerRealTest({
+        site: 'chatgpt',
+        skipSync: true,
+        expected: 'expected output',
+        url: 'https://chatgpt.com/c/fixture',
+      });
+
+      assert.deepEqual(syncCalls, []);
+      assert.deepEqual(result.sync, { skipped: true });
+      assert.equal(result.pageUrl, 'https://chatgpt.com/c/fixture');
+      assert.equal(result.validation.matches, true);
+    } finally {
+      Object.assign(runner.ADAPTERS.chatgpt, originalAdapter);
+    }
+  } finally {
+    delete require.cache[runnerPath];
+    if (originalRunnerModule) require.cache[runnerPath] = originalRunnerModule;
+    if (originalUtilsModule) require.cache[utilsPath] = originalUtilsModule;
+    else delete require.cache[utilsPath];
+  }
+});
+
 test('parseCliArgs keeps boolean flags and key-value pairs', () => {
   assert.deepEqual(parseCliArgs([
     '--site', 'chatgpt',

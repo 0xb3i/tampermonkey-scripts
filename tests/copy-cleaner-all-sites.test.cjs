@@ -34,19 +34,22 @@ test('buildRunnerCommand forwards shared runner arguments to each site invocatio
     buildRunnerCommand('gemini', {
       'cdp-url': 'http://127.0.0.1:9222',
       'script-path': '/tmp/copy-cleaner.user.js',
+      'skip-sync': true,
     }),
     [
       require.resolve('../automation/copy-cleaner-runner.js'),
       '--site', 'gemini',
       '--cdp-url', 'http://127.0.0.1:9222',
       '--script-path', '/tmp/copy-cleaner.user.js',
+      '--skip-sync',
     ]
   );
 });
 
-test('runAllSites executes every site sequentially and stops on the first failure', async () => {
+test('runAllSites synchronizes once and then executes every site sequentially with skip-sync', async () => {
   const calls = [];
   const logs = [];
+  const syncCalls = [];
 
   await assert.rejects(async function () {
     await runAllSites({}, {
@@ -54,6 +57,9 @@ test('runAllSites executes every site sequentially and stops on the first failur
         log: function (message) {
           logs.push(message);
         },
+      },
+      syncScript: async function () {
+        syncCalls.push('sync');
       },
       runCommand: async function (site, commandArgs) {
         calls.push({ site, commandArgs });
@@ -64,13 +70,42 @@ test('runAllSites executes every site sequentially and stops on the first failur
     });
   }, /tika failed/);
 
+  assert.deepEqual(syncCalls, ['sync']);
   assert.deepEqual(calls.map(function (entry) { return entry.site; }), ['chatgpt', 'gemini', 'tika']);
   assert.deepEqual(logs, [
+    '[copy-cleaner-all-sites] sync:start',
+    '[copy-cleaner-all-sites] sync:done',
     '[copy-cleaner-all-sites] site:start chatgpt',
     '[copy-cleaner-all-sites] site:done chatgpt',
     '[copy-cleaner-all-sites] site:start gemini',
     '[copy-cleaner-all-sites] site:done gemini',
     '[copy-cleaner-all-sites] site:start tika',
   ]);
-  assert.deepEqual(calls[0].commandArgs, [require.resolve('../automation/copy-cleaner-runner.js'), '--site', 'chatgpt']);
+  assert.deepEqual(calls[0].commandArgs, [
+    require.resolve('../automation/copy-cleaner-runner.js'),
+    '--site', 'chatgpt',
+    '--skip-sync',
+  ]);
+});
+
+test('runAllSites honors aggregate skip-sync and avoids the upfront sync step too', async () => {
+  const calls = [];
+  let syncCalled = false;
+
+  await runAllSites({ 'skip-sync': true, site: 'chatgpt' }, {
+    logger: { log: function () {} },
+    syncScript: async function () {
+      syncCalled = true;
+    },
+    runCommand: async function (_site, commandArgs) {
+      calls.push(commandArgs);
+    },
+  });
+
+  assert.equal(syncCalled, false);
+  assert.deepEqual(calls, [[
+    require.resolve('../automation/copy-cleaner-runner.js'),
+    '--site', 'chatgpt',
+    '--skip-sync',
+  ]]);
 });

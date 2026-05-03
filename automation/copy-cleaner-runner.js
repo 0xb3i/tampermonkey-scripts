@@ -6,6 +6,7 @@ const {
   DEFAULT_CDP_ENDPOINT,
   connectToChromeOverCDP,
   getPrimaryContext,
+  getPrimaryPage,
   navigateCurrentTab,
   syncUserscriptInBrowser,
 } = require('../lib/tampermonkey-cdp-utils.cjs');
@@ -440,18 +441,30 @@ async function runCopyCleanerRealTest(options) {
   var selectedCase = getRealTestCase(site, runtimeOptions.caseId || DEFAULT_CASE_IDS[site]);
   var targetUrl = runtimeOptions.url || selectedCase.url;
   var expectedText = runtimeOptions.expected || selectedCase.expectedText || '';
+  var skipSync = !!runtimeOptions.skipSync;
 
   var browser = await connectToChromeOverCDP(endpointUrl);
   try {
     var context = getPrimaryContext(browser);
-    console.log('[copy-cleaner-runner] sync:start');
-    var syncStep = await syncUserscriptInBrowser(browser, {
-      scriptPath: scriptPath,
-    });
-    var page = syncStep.page;
-    var originalUrl = syncStep.previousUrl;
-    var syncResult = syncStep.sync;
-    console.log('[copy-cleaner-runner] sync:done');
+    var page;
+    var originalUrl;
+    var syncResult;
+
+    if (skipSync) {
+      console.log('[copy-cleaner-runner] sync:skip');
+      page = await getPrimaryPage(browser);
+      originalUrl = page.url();
+      syncResult = { skipped: true };
+    } else {
+      console.log('[copy-cleaner-runner] sync:start');
+      var syncStep = await syncUserscriptInBrowser(browser, {
+        scriptPath: scriptPath,
+      });
+      page = syncStep.page;
+      originalUrl = syncStep.previousUrl;
+      syncResult = syncStep.sync;
+      console.log('[copy-cleaner-runner] sync:done');
+    }
 
     console.log('[copy-cleaner-runner] page:navigate');
     page = await adapter.navigateToPage(context, page, targetUrl);
@@ -513,6 +526,7 @@ if (require.main === module) {
       site: site,
       cdpUrl: args['cdp-url'] || DEFAULT_CDP_ENDPOINT,
       scriptPath: args['script-path'] || DEFAULT_SCRIPT_PATH,
+      skipSync: !!args['skip-sync'],
       url: args.url,
       expected: args.expected,
       caseId: args.case || DEFAULT_CASE_IDS[site],
