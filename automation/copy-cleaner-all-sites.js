@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 const { spawn } = require('child_process');
+const { resolve } = require('path');
 
 const {
   DEFAULT_CDP_ENDPOINT,
@@ -10,6 +11,7 @@ const {
 const { parseCliArgs } = require('./copy-cleaner-runner.js');
 
 const DEFAULT_SITES = ['chatgpt', 'gemini', 'tika', 'aistudio'];
+const DEFAULT_SCRIPT_PATH = resolve(__dirname, '../userscripts/copy-cleaner.user.js');
 const RUNNER_ENTRY = require.resolve('./copy-cleaner-runner.js');
 
 function resolveSites(args) {
@@ -61,7 +63,7 @@ async function defaultSyncScript(args) {
   var browser = await connectToChromeOverCDP(endpointUrl);
   try {
     return await syncUserscriptInBrowser(browser, {
-      scriptPath: runtimeArgs['script-path'],
+      scriptPath: runtimeArgs['script-path'] ? String(runtimeArgs['script-path']) : DEFAULT_SCRIPT_PATH,
     });
   } finally {
     await browser.close();
@@ -121,6 +123,7 @@ async function runAllSites(args, options) {
 
 module.exports = {
   DEFAULT_SITES: DEFAULT_SITES,
+  DEFAULT_SCRIPT_PATH: DEFAULT_SCRIPT_PATH,
   buildRunnerCommand: buildRunnerCommand,
   defaultSyncScript: defaultSyncScript,
   resolveSites: resolveSites,

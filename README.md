@@ -71,43 +71,52 @@
 启动好 `9222` 调试 Chrome 后，直接执行真实场景测试：
 
 ```bash
-npm run copycleaner:realtest
+npm run copycleaner:all
 ```
 
-或执行当前内置的 Tika 固定会话页回归：
+如需只跑单站，也可以直接执行：
 
 ```bash
+npm run copycleaner:chatgpt
+npm run copycleaner:gemini
 npm run copycleaner:tika
+npm run copycleaner:aistudio
 ```
 
-该命令会自动完成：
+正确用法约束：
+
+- `copycleaner:all` 是默认的完整真实站点回归入口。它会先做 **一次** Tampermonkey 同步，然后按 `chatgpt -> gemini -> tika -> aistudio` 串行回归。
+- 聚合入口里的子 runner 会自动带 `--skip-sync` 复用这次已同步状态，所以**不要**把 `--skip-sync` 当成冷启动命令单独使用；它只适合“前面已经成功做过一次同步”的场景。
+- 如果你是在受限沙箱里跑，`9222` 连接可能会被 `EPERM` 拦住；这时要改成提权运行，而不是怀疑 `copycleaner:all` 本身失效。
+- `copycleaner:realtest` 已废弃，不要再使用这个旧名字。
+
+完整回归会自动完成：
 
 1. 连接 `http://127.0.0.1:9222`
-2. 把本地 `userscripts/copy-cleaner.user.js` 同步进 Tampermonkey
-3. 在当前标签页打开 `https://chatgpt.com/`
-4. 发送固定提示词，并点击 ChatGPT 官方回复 copy 按钮
-5. 读取系统剪贴板，校验结果是否为 `AI公式在 $x^2$ 里`
+2. 把本地 `userscripts/copy-cleaner.user.js` 同步进 Tampermonkey 一次
+3. 如果当前没有可复用网页页签，就在同一只 `9222` 浏览器里自动补一个 tab
+4. 按顺序打开各站点固定 fixture / 会话页
+5. 通过站点官方 copy 按钮或菜单触发 userscript 拦截
+6. 对比 page marker / 系统剪贴板与各站点 oracle 是否完全一致
 
 这条命令比 `npm test` 更接近真实效果，因为它验证的是：
 
-1. 本地 userscript 是否成功同步进 Tampermonkey
-2. ChatGPT 官方 copy 按钮是否真的走到了脚本拦截链路
-3. 系统剪贴板里的最终文本和标准答案是否完全一致
+1. 本地 userscript 是否真的成功同步进 Tampermonkey
+2. 各站点官方 copy 路径是否真的走到了脚本拦截链路
+3. 聚合串行回归是否能在同一只已登录 `9222` 浏览器里稳定跑完
+4. page marker / 系统剪贴板里的最终文本和标准答案是否完全一致
 
 查看当前内置真实 case：
 
 ```bash
-node automation/copy-cleaner-chatgpt-runner.js --list-cases
-```
-
-```bash
-node automation/copy-cleaner-tika-runner.js --list-cases
+node automation/copy-cleaner-runner.js --list-cases
 ```
 
 如果要自定义目标页面或断言文本，也可以直接运行：
 
 ```bash
-node automation/copy-cleaner-chatgpt-runner.js \
+node automation/copy-cleaner-runner.js \
+  --site chatgpt \
   --case chatgpt-basic-cleanup \
   --url https://chatgpt.com/ \
   --expected 'AI公式在 $x^2$ 里'

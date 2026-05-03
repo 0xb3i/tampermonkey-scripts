@@ -3,8 +3,10 @@ const assert = require('node:assert/strict');
 
 const packageJson = require('../package.json');
 const {
+  DEFAULT_SCRIPT_PATH,
   DEFAULT_SITES,
   buildRunnerCommand,
+  defaultSyncScript,
   resolveSites,
   runAllSites,
 } = require('../automation/copy-cleaner-all-sites.js');
@@ -108,4 +110,51 @@ test('runAllSites honors aggregate skip-sync and avoids the upfront sync step to
     '--site', 'chatgpt',
     '--skip-sync',
   ]]);
+});
+
+test('defaultSyncScript falls back to the shared userscript path when no script-path is provided', async () => {
+  const allSitesPath = require.resolve('../automation/copy-cleaner-all-sites.js');
+  const utilsPath = require.resolve('../lib/tampermonkey-cdp-utils.cjs');
+  const originalAllSitesModule = require.cache[allSitesPath];
+  const originalUtilsModule = require.cache[utilsPath];
+  const calls = [];
+
+  require.cache[utilsPath] = {
+    id: utilsPath,
+    filename: utilsPath,
+    loaded: true,
+    exports: {
+      DEFAULT_CDP_ENDPOINT: 'http://127.0.0.1:9222',
+      connectToChromeOverCDP: async function (endpointUrl) {
+        calls.push(['connect', endpointUrl]);
+        return {
+          close: async function () {
+            calls.push(['close']);
+          },
+        };
+      },
+      syncUserscriptInBrowser: async function (_browser, options) {
+        calls.push(['sync', options]);
+        return { sync: { ok: true } };
+      },
+    },
+  };
+  delete require.cache[allSitesPath];
+
+  try {
+    const reloadedModule = require('../automation/copy-cleaner-all-sites.js');
+    await reloadedModule.defaultSyncScript({});
+
+    assert.deepEqual(calls, [
+      ['connect', 'http://127.0.0.1:9222'],
+      ['sync', { scriptPath: reloadedModule.DEFAULT_SCRIPT_PATH }],
+      ['close'],
+    ]);
+  } finally {
+    delete require.cache[allSitesPath];
+    if (originalAllSitesModule) require.cache[allSitesPath] = originalAllSitesModule;
+    if (originalUtilsModule) require.cache[utilsPath] = originalUtilsModule;
+    else delete require.cache[utilsPath];
+  }
+  assert.match(DEFAULT_SCRIPT_PATH, /userscripts\/copy-cleaner\.user\.js$/);
 });
