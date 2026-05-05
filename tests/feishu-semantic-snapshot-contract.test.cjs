@@ -5,12 +5,15 @@ const path = require('node:path');
 
 test('userscript syncs semantic snapshot into validation and extraction DOM attributes', () => {
   const source = fs.readFileSync(path.join(__dirname, '../userscripts/feishu-helper.user.js'), 'utf8');
-  assert.match(source, /semanticSnapshot:\s*snap\.semanticSnapshot\s*\|\|\s*null/);
-  assert.match(source, /semanticSnapshot:\s*result\s*&&\s*result\.semanticSnapshot\s*\|\|\s*null/);
-  assert.match(source, /function collectSemanticSnapshot\(/);
-  assert.match(source, /mergeSemanticSnapshots\s*\(/);
-  assert.match(source, /collectSemanticSnapshotFromStructService\s*\(/);
-  assert.match(source, /collectSemanticSnapshotFromDomFallback\s*\(/);
+  // Semantic snapshot is attached to the pendingPaste record the runner will
+  // validate against, and written into the two DOM attrs the runner polls.
+  assert.match(source, /semanticSnapshot:\s*semanticSnapshot/);
+  assert.match(source, /data-feishu-validation-snapshot/);
+  assert.match(source, /data-feishu-extraction-result/);
+  assert.match(source, /createSemanticSnapshotCollector\s*\(/);
+  assert.match(source, /collectFromStructService\(/);
+  assert.match(source, /collectFromDom\(/);
+  assert.match(source, /mergeSemanticSnapshots\(/);
 });
 
 test('userscript DOM fallback covers non-text rich components beyond tables and images', () => {
@@ -30,8 +33,8 @@ test('userscript chooses the richest editable root instead of blindly taking the
 
 test('userscript searches editor APIs starting from the chosen content root before activeElement fallbacks', () => {
   const source = fs.readFileSync(path.join(__dirname, '../userscripts/feishu-helper.user.js'), 'utf8');
-  const rootIndex = source.indexOf('pushCandidate(getContentRootElement());');
-  const activeIndex = source.indexOf('pushCandidate(document.activeElement);');
+  const rootIndex = source.indexOf('push(getContentRootElement());');
+  const activeIndex = source.indexOf('push(document.activeElement);');
   assert.ok(rootIndex >= 0);
   assert.ok(activeIndex >= 0);
   assert.ok(rootIndex < activeIndex);

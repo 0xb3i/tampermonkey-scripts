@@ -4,14 +4,15 @@
 
 - `feishu-helper`：绕过飞书文档复制限制，1 比 1 复刻源飞书文档。
 - `copy-cleaner`：清理 AI 输出的噪音，将网页渲染出的乱码公式和列表等组件转换成更稳定的 Markdown。
+- `tap-tap`：双击在新标签页打开网页。
 
 ## 目录
 
 - `userscripts/`：安装到 Tampermonkey 的脚本
-- `automation/`：真实浏览器测试 runner 和内置 case
+- `automation/`：真实浏览器测试脚本
 - `lib/`：CDP、Tampermonkey 同步、站点适配等复用逻辑
 - `bin/`：CLI 入口
-- `tests/`：单测
+- `tests/`：单元测试
 
 ## 脚本
 
@@ -26,6 +27,8 @@
 安装：
 
 - 将 [userscripts/feishu-helper.user.js](userscripts/feishu-helper.user.js) 添加到 Tampermonkey
+
+> 该脚本由 `bin/build-feishu-userscript.cjs` 把 `lib/feishu-*.cjs` 内联进文件生成。仓库里提交的文件已是"可直接安装"状态；改动 `lib/` 之后运行 `npm run build:feishu` 重新生成再粘贴。
 
 适用页面：
 
@@ -127,7 +130,6 @@ else:
     raise SystemExit('Chrome started but CDP 9222 was not ready within 30s')
 print(clone_dir)
 PY
-agent-browser connect 9222
 ```
 
 ## 常见问题

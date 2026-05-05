@@ -5,13 +5,14 @@
   "private": true,
   "scripts": {
     "test": "node --test ./tests/*.test.cjs",
+    "build:feishu": "node bin/build-feishu-userscript.cjs",
     "copycleaner:all": "node automation/copy-cleaner-all-sites.js",
     "copycleaner:aistudio": "node automation/copy-cleaner-runner.js --site aistudio",
     "copycleaner:chatgpt": "node automation/copy-cleaner-runner.js --site chatgpt",
     "copycleaner:gemini": "node automation/copy-cleaner-runner.js --site gemini",
     "copycleaner:prompttest": "node automation/copy-cleaner-runner.js --site chatgpt --case chatgpt-basic-cleanup",
     "copycleaner:tika": "node automation/copy-cleaner-runner.js --site tika",
-    "feishu:test": "node automation/feishu-runner.js",
+    "feishu:test": "npm run build:feishu && node automation/feishu-runner.js",
     "feishu:cases": "node automation/feishu-runner.js --list-cases",
     "tampermonkey:sync": "node bin/tampermonkey-sync-cli.cjs"
   },

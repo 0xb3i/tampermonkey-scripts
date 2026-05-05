@@ -5,7 +5,7 @@ const path = require('node:path');
 
 const {
   downgradeStructuredImagesForPaste,
-} = require('../lib/feishu-image-paste-utils.cjs');
+} = require('../lib/feishu-docx-record.cjs');
 
 test('downgradeStructuredImagesForPaste removes image records and strips structured attrs from base64 image figures', () => {
   const originalRecord = {
@@ -132,7 +132,7 @@ test('userscript opts into Tampermonkey shared storage APIs for cross-subdomain 
 
 test('userscript clears stale uploaded token maps when a newer pending paste payload is loaded', () => {
   const source = fs.readFileSync(path.join(__dirname, '../userscripts/feishu-helper.user.js'), 'utf8');
-  assert.match(source, /var _uploadedTokenMapPendingTs = 0;/);
+  assert.match(source, /uploadedTokenMapPendingTs\s*=\s*0/);
   assert.match(source, /function ensureUploadedTokenMapMatchesPending\(/);
-  assert.match(source, /stale-uploaded-token-map-cleared/);
+  assert.match(source, /clearUploadedTokenMap\(\)/);
 });

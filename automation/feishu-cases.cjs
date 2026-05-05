@@ -1,5 +1,6 @@
 const DEFAULT_CASE_ID = 'feishu-docx-to-wiki-rich-components';
 const EQUATION_CASE_ID = 'feishu-docx-to-wiki-equation';
+const CALLOUT_IMAGE_CASE_ID = 'feishu-wiki-to-wiki-callout-image';
 
 const CASES = {
   [DEFAULT_CASE_ID]: {
@@ -96,6 +97,44 @@ const CASES = {
       },
     },
   },
+  [CALLOUT_IMAGE_CASE_ID]: {
+    id: CALLOUT_IMAGE_CASE_ID,
+    description: 'wiki → wiki 的 callout + 图片文档复制，验证 callout 组件数、图片上传与粘贴落地。',
+    sourceUrl: 'https://scnajei2ds6y.feishu.cn/wiki/X6p1wdLxyiX9Xtk8GeLcgc8Gn3b',
+    targetUrl: 'https://my.feishu.cn/wiki/QQUQwzeK7iH8RikJIQGc1N2rn3d',
+    action: 'validateDuplicateDocument',
+    expect: {
+      extraction: {
+        minBlockCount: 1,
+        minEquationCount: 0,
+        requirePendingPaste: true,
+        requiredSourceComponentTypes: [
+          'callout',
+          'image',
+        ],
+      },
+      upload: {
+        minUploadedCount: 3,
+        maxFailedUploads: 0,
+      },
+      paste: {
+        requireChanged: true,
+      },
+      render: {
+        requiredTargetComponents: [
+          {
+            type: 'callout',
+            minCount: 5,
+          },
+          {
+            type: 'image',
+            minCount: 3,
+            requireRendered: true,
+          },
+        ],
+      },
+    },
+  },
 };
 
 function cloneCase(testCase) {
@@ -119,6 +158,7 @@ function getFeishuCase(caseId) {
 
 module.exports = {
   CASES: CASES,
+  CALLOUT_IMAGE_CASE_ID: CALLOUT_IMAGE_CASE_ID,
   DEFAULT_CASE_ID: DEFAULT_CASE_ID,
   EQUATION_CASE_ID: EQUATION_CASE_ID,
   getFeishuCase: getFeishuCase,
