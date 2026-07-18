@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Tap To Tab
 // @namespace    https://local.userscripts.niubei/
-// @version      0.3.1
+// @version      0.4.0
 // @description  Hold a normal link to open it in a new tab without delaying regular clicks.
 // @author       Codex
 // @match        http://*/*
@@ -15,7 +15,7 @@
 
   const CONFIG = {
     holdDelayMs: 300,
-    movementTolerancePx: 32,
+    preArmMovementTolerancePx: 48,
     openInBackground: false,
     excludedHostPatterns: [
       // '*.example.com',
@@ -38,14 +38,13 @@
 
   installFeedbackStyle();
 
-  document.addEventListener('pointerdown', handlePointerDown, true);
-  document.addEventListener('pointermove', handlePointerMove, true);
-  document.addEventListener('pointerup', handlePointerUp, true);
-  document.addEventListener('pointercancel', handlePointerCancel, true);
+  document.addEventListener('mousedown', handleMouseDown, true);
+  document.addEventListener('mousemove', handleMouseMove, true);
+  window.addEventListener('mouseup', handleMouseUp, true);
   document.addEventListener('dragstart', handleDragStart, true);
   document.addEventListener('webkitmouseforcewillbegin', handleForcePress, true);
   window.addEventListener('click', handleGuardedClick, true);
-  window.addEventListener('blur', cancelActivePress, true);
+  window.addEventListener('blur', cancelActivePress);
   document.addEventListener('visibilitychange', handleVisibilityChange, true);
 
   function log(...args) {
@@ -78,11 +77,11 @@
     document.documentElement.appendChild(style);
   }
 
-  function handlePointerDown(event) {
-    cancelActivePress('new-pointerdown');
+  function handleMouseDown(event) {
+    cancelActivePress('new-mousedown');
 
     const anchor = findAnchor(event);
-    if (!isEligiblePointer(event, anchor)) {
+    if (!isEligibleMouseDown(event, anchor)) {
       return;
     }
 
@@ -92,7 +91,6 @@
     }
 
     const press = {
-      pointerId: event.pointerId,
       anchor,
       url,
       startedAt: now(),
@@ -104,11 +102,13 @@
     };
 
     press.timerId = window.setTimeout(() => {
-      if (activePress !== press || !press.anchor.isConnected) {
+      if (activePress !== press) {
         return;
       }
       press.armed = true;
-      press.anchor.setAttribute(READY_ATTRIBUTE, '');
+      if (press.anchor.isConnected) {
+        press.anchor.setAttribute(READY_ATTRIBUTE, '');
+      }
       log('armed', press.url.href);
     }, CONFIG.holdDelayMs);
 
@@ -117,38 +117,37 @@
     log('pressing', url.href);
   }
 
-  function handlePointerMove(event) {
-    if (!isActivePointer(event)) {
+  function handleMouseMove(event) {
+    if (!activePress || activePress.armed) {
+      return;
+    }
+
+    if (typeof event.buttons === 'number' && (event.buttons & 1) === 0) {
+      cancelActivePress('primary-button-released');
       return;
     }
 
     const deltaX = event.clientX - activePress.startX;
     const deltaY = event.clientY - activePress.startY;
     const distanceSquared = (deltaX * deltaX) + (deltaY * deltaY);
-    const toleranceSquared = CONFIG.movementTolerancePx * CONFIG.movementTolerancePx;
+    const toleranceSquared = CONFIG.preArmMovementTolerancePx * CONFIG.preArmMovementTolerancePx;
     activePress.maxDistanceSquared = Math.max(activePress.maxDistanceSquared, distanceSquared);
     if (activePress.maxDistanceSquared > toleranceSquared) {
-      cancelActivePress('pointer-moved');
+      cancelActivePress('mouse-moved-before-arm');
     }
   }
 
   function handleDragStart(event) {
-    if (!activePress || findAnchor(event) !== activePress.anchor) {
+    if (!activePress) {
       return;
     }
 
-    const toleranceSquared = CONFIG.movementTolerancePx * CONFIG.movementTolerancePx;
-    if (activePress.maxDistanceSquared <= toleranceSquared) {
-      event.preventDefault();
-      log('suppressed accidental drag', activePress.url.href);
-      return;
-    }
-
-    cancelActivePress('drag-started');
+    event.preventDefault();
+    log('suppressed native drag', activePress.url.href);
   }
 
   function handleForcePress(event) {
-    if (!activePress || findAnchor(event) !== activePress.anchor) {
+    if (!activePress) {
       return;
     }
 
@@ -156,18 +155,14 @@
     log('suppressed force click lookup', activePress.url.href);
   }
 
-  function handlePointerUp(event) {
-    if (!isActivePointer(event)) {
+  function handleMouseUp(event) {
+    if (!activePress || event.button !== 0) {
       return;
     }
 
     const press = activePress;
-    const releasedAnchor = findAnchor(event);
     const heldLongEnough = press.armed || now() - press.startedAt >= CONFIG.holdDelayMs;
-    const shouldOpen = heldLongEnough &&
-      releasedAnchor === press.anchor &&
-      press.anchor.isConnected &&
-      !hasModifierKey(event);
+    const shouldOpen = heldLongEnough && !hasModifierKey(event);
 
     clearActivePress();
 
@@ -176,30 +171,8 @@
       return;
     }
 
-    guardNextClick(press.anchor);
+    guardNextClick();
     event.preventDefault();
-    openUrlInNewTab(press.url);
-  }
-
-  function handlePointerCancel(event) {
-    if (!isActivePointer(event)) {
-      return;
-    }
-
-    const press = activePress;
-    const heldLongEnough = press.armed || now() - press.startedAt >= CONFIG.holdDelayMs;
-    const shouldOpen = heldLongEnough && press.anchor.isConnected;
-    clearActivePress();
-
-    if (!shouldOpen) {
-      log('cancelled', 'pointer-cancelled', press.url.href);
-      return;
-    }
-
-    guardNextClick(press.anchor);
-    if (event.cancelable) {
-      event.preventDefault();
-    }
     openUrlInNewTab(press.url);
   }
 
@@ -208,25 +181,16 @@
       return;
     }
 
-    const guardedAnchor = guardedClick.anchor;
     clearGuardedClick();
-    if (findAnchor(event) !== guardedAnchor) {
-      return;
-    }
-
     event.preventDefault();
     event.stopImmediatePropagation();
-    log('suppressed native click', guardedAnchor.href);
+    log('suppressed native click');
   }
 
   function handleVisibilityChange() {
     if (document.hidden) {
       cancelActivePress('document-hidden');
     }
-  }
-
-  function isActivePointer(event) {
-    return Boolean(activePress && event.pointerId === activePress.pointerId);
   }
 
   function clearActivePress() {
@@ -251,9 +215,9 @@
     }
   }
 
-  function guardNextClick(anchor) {
+  function guardNextClick() {
     clearGuardedClick();
-    guardedClick = { anchor };
+    guardedClick = true;
     guardedClickTimerId = window.setTimeout(clearGuardedClick, 0);
   }
 
@@ -280,11 +244,11 @@
     window.open(url.href, '_blank', 'noopener,noreferrer');
   }
 
-  function isEligiblePointer(event, anchor) {
+  function isEligibleMouseDown(event, anchor) {
     if (!(anchor instanceof HTMLAnchorElement)) {
       return false;
     }
-    if (event.isPrimary === false || event.button !== 0) {
+    if (event.button !== 0) {
       return false;
     }
     if (event.pointerType && event.pointerType !== 'mouse') {
