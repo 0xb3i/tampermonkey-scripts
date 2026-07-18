@@ -1,22 +1,11 @@
 {
   "name": "tampermonkey-scripts",
-  "version": "1.1.0",
-  "description": "可直接安装并带自动化验证的 Tampermonkey 用户脚本集合",
+  "version": "2.0.0",
+  "description": "可直接安装并带纯 Node 单元测试的 Tampermonkey 用户脚本集合",
   "private": true,
   "scripts": {
-    "test": "node --test ./tests/*.test.cjs",
-    "copycleaner:all": "node automation/copy-cleaner-all-sites.js",
-    "copycleaner:aistudio": "node automation/copy-cleaner-runner.js --site aistudio",
-    "copycleaner:chatgpt": "node automation/copy-cleaner-runner.js --site chatgpt",
-    "copycleaner:gemini": "node automation/copy-cleaner-runner.js --site gemini",
-    "copycleaner:prompttest": "node automation/copy-cleaner-runner.js --site chatgpt --case chatgpt-basic-cleanup",
-    "copycleaner:tika": "node automation/copy-cleaner-runner.js --site tika",
-    "tampermonkey:sync": "node bin/tampermonkey-sync-cli.cjs"
+    "test": "node --test ./tests/*.test.cjs"
   },
-  "bin": {
-    "tampermonkey-sync": "./bin/tampermonkey-sync-cli.cjs"
-  },
-  "main": "index.js",
   "directories": {
     "test": "tests"
   },
@@ -29,8 +18,5 @@
   "type": "commonjs",
   "engines": {
     "node": ">=20"
-  },
-  "devDependencies": {
-    "@playwright/test": "^1.61.1"
   }
 }

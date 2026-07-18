@@ -30,50 +30,24 @@
 ## 目录
 
 - `userscripts/`：可直接安装的用户脚本。
-- `automation/`：复制净化器的真实浏览器验证与稳定用例。
-- `lib/`：CDP、脚本同步和 CLI 公共能力。
-- `bin/`：命令行入口。
-- `tests/`：Node.js 单元与契约测试。
+- `tests/`：不依赖浏览器的 Node.js 单元与仓库契约测试。
 
 ## 开发与验证
 
 要求 Node.js 20 或更高版本。
 
 ```bash
-npm install
 npm test
 ```
 
-真实站点验证需要一个已登录、开启 CDP `9222` 端口的 Chrome：
+## 同步与浏览器验证
 
-```bash
-curl -s http://127.0.0.1:9222/json/version
-npm run copycleaner:all
+仓库不再提供浏览器控制、脚本同步 CLI 或 Node API。需要更新 Tampermonkey 或验证真实网页时，在 Codex 中明确要求使用 **Chrome DevTools MCP** 操作当前 Chrome。
+
+推荐请求方式：
+
+```text
+使用 Chrome DevTools MCP，将 userscripts/tap-to-tab.user.js 更新到当前 Chrome 的 Tampermonkey，并校验版本、启用状态和源码哈希。
 ```
 
-也可以只验证单个站点：
-
-```bash
-npm run copycleaner:chatgpt
-npm run copycleaner:gemini
-npm run copycleaner:aistudio
-npm run copycleaner:tika
-```
-
-## 同步到 Tampermonkey
-
-```bash
-npm run tampermonkey:sync -- --script-path userscripts/copy-cleaner.user.js
-npm run tampermonkey:sync -- --script-path userscripts/tap-to-tab.user.js
-```
-
-Node API：
-
-```js
-const { syncUserscriptToTampermonkey } = require('./index.js');
-
-await syncUserscriptToTampermonkey({
-  scriptPath: './userscripts/copy-cleaner.user.js',
-  cdpUrl: 'http://127.0.0.1:9222',
-});
-```
+同步完成后应确认 Tampermonkey 中的脚本版本与本地 `@version` 一致、脚本处于启用状态、编辑器源码哈希与本地文件一致，并刷新需要加载新版本的现有网页。
