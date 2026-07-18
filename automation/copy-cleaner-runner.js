@@ -22,8 +22,7 @@ const {
   getRealTestCase,
   listRealTestCases,
 } = require('./copy-cleaner-cases.cjs');
-
-const DEFAULT_SCRIPT_PATH = resolve(__dirname, '../userscripts/copy-cleaner.user.js');
+const { DEFAULT_SCRIPT_PATH } = require('./copy-cleaner-config.cjs');
 
 function findExistingPageForUrl(context, targetUrl, currentPage) {
   var expectedUrl = String(targetUrl || '');

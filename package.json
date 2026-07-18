@@ -1,33 +1,36 @@
 {
   "name": "tampermonkey-scripts",
-  "version": "1.0.0",
-  "description": "Collection of Tampermonkey userscripts",
+  "version": "1.1.0",
+  "description": "可直接安装并带自动化验证的 Tampermonkey 用户脚本集合",
   "private": true,
   "scripts": {
     "test": "node --test ./tests/*.test.cjs",
-    "build:feishu": "node bin/build-feishu-userscript.cjs",
     "copycleaner:all": "node automation/copy-cleaner-all-sites.js",
     "copycleaner:aistudio": "node automation/copy-cleaner-runner.js --site aistudio",
     "copycleaner:chatgpt": "node automation/copy-cleaner-runner.js --site chatgpt",
     "copycleaner:gemini": "node automation/copy-cleaner-runner.js --site gemini",
     "copycleaner:prompttest": "node automation/copy-cleaner-runner.js --site chatgpt --case chatgpt-basic-cleanup",
     "copycleaner:tika": "node automation/copy-cleaner-runner.js --site tika",
-    "feishu:test": "npm run build:feishu && node automation/feishu-runner.js",
-    "feishu:cases": "node automation/feishu-runner.js --list-cases",
     "tampermonkey:sync": "node bin/tampermonkey-sync-cli.cjs"
   },
   "bin": {
     "tampermonkey-sync": "./bin/tampermonkey-sync-cli.cjs"
   },
-  "devDependencies": {
-    "@playwright/test": "^1.60.0-alpha-2026-05-01"
-  },
   "main": "index.js",
   "directories": {
     "test": "tests"
   },
-  "keywords": [],
+  "keywords": [
+    "tampermonkey",
+    "userscript"
+  ],
   "author": "",
   "license": "ISC",
-  "type": "commonjs"
+  "type": "commonjs",
+  "engines": {
+    "node": ">=20"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.61.1"
+  }
 }

@@ -1,19 +1,4 @@
-function parseCliArgs(argv) {
-  var result = {};
-  for (var i = 0; i < argv.length; i++) {
-    var token = String(argv[i] || '');
-    if (!token.startsWith('--')) continue;
-    var key = token.slice(2);
-    var next = argv[i + 1];
-    if (!next || String(next).startsWith('--')) {
-      result[key] = true;
-      continue;
-    }
-    result[key] = next;
-    i += 1;
-  }
-  return result;
-}
+const { parseCliArgs } = require('../lib/cli-args.cjs');
 
 function normalizeText(text, ignoreLinePatterns) {
   var patterns = Array.isArray(ignoreLinePatterns) ? ignoreLinePatterns : [];
@@ -51,9 +36,7 @@ function normalizeText(text, ignoreLinePatterns) {
   return result.join('\n').trim();
 }
 
-function buildExactTextMismatchSummary(expectedText, actualText) {
-  var expected = String(expectedText || '').replace(/\r\n?/g, '\n').trim();
-  var actual = String(actualText || '').replace(/\r\n?/g, '\n').trim();
+function buildMismatchSummary(expected, actual) {
   if (expected === actual) {
     return {
       matches: true,
@@ -77,30 +60,16 @@ function buildExactTextMismatchSummary(expectedText, actualText) {
   };
 }
 
+function buildExactTextMismatchSummary(expectedText, actualText) {
+  var expected = String(expectedText || '').replace(/\r\n?/g, '\n').trim();
+  var actual = String(actualText || '').replace(/\r\n?/g, '\n').trim();
+  return buildMismatchSummary(expected, actual);
+}
+
 function buildTextMismatchSummary(expectedText, actualText, ignoreLinePatterns) {
   var expected = normalizeText(expectedText, ignoreLinePatterns);
   var actual = normalizeText(actualText, ignoreLinePatterns);
-  if (expected === actual) {
-    return {
-      matches: true,
-      firstDiffIndex: -1,
-      expectedFragment: '',
-      actualFragment: '',
-    };
-  }
-  var index = 0;
-  var max = Math.max(expected.length, actual.length);
-  while (index < max && expected.charAt(index) === actual.charAt(index)) {
-    index += 1;
-  }
-  var start = Math.max(0, index - 12);
-  var end = index + 24;
-  return {
-    matches: false,
-    firstDiffIndex: index,
-    expectedFragment: expected.slice(start, end),
-    actualFragment: actual.slice(start, end),
-  };
+  return buildMismatchSummary(expected, actual);
 }
 
 async function ensureClipboardPermission(context, origin) {

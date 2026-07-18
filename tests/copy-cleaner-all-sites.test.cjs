@@ -11,11 +11,17 @@ const {
   runAllSites,
 } = require('../automation/copy-cleaner-all-sites.js');
 
-test('package scripts expose aggregate and explicit copycleaner commands only', () => {
-  assert.equal(packageJson.scripts['copycleaner:all'], 'node automation/copy-cleaner-all-sites.js');
-  assert.equal(packageJson.scripts['copycleaner:chatgpt'], 'node automation/copy-cleaner-runner.js --site chatgpt');
-  assert.equal(packageJson.scripts['copycleaner:realtest'], undefined);
-  assert.equal(packageJson.scripts['copycleaner:chatgpt-fixture'], undefined);
+test('package exposes only maintained test, copy cleaner, and sync commands', () => {
+  assert.deepEqual(Object.keys(packageJson.scripts).sort(), [
+    'copycleaner:aistudio',
+    'copycleaner:all',
+    'copycleaner:chatgpt',
+    'copycleaner:gemini',
+    'copycleaner:prompttest',
+    'copycleaner:tika',
+    'tampermonkey:sync',
+    'test',
+  ]);
 });
 
 test('resolveSites defaults to all supported sites in a stable serial order', () => {

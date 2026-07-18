@@ -171,7 +171,7 @@ test('copy cleaner selection payload preserves nested ordered lists for structur
   );
 });
 
-test('copy cleaner selection payload normalizes nested unordered lists for Feishu-friendly indentation', () => {
+test('copy cleaner selection payload normalizes nested unordered lists to four-space indentation', () => {
   const { buildClipboardPayloadFromSelection } = loadCopyCleanerExports();
   const fragment = createFragment([
     createElement('UL', [
@@ -345,7 +345,7 @@ test('copy cleaner preserves existing markdown styling when clipboard text is al
   );
 });
 
-test('copy cleaner inserts a blank line after markdown tables for Feishu rendering', () => {
+test('copy cleaner inserts a blank line after markdown tables', () => {
   const { normalizeStructuredMarkdownForPaste } = loadCopyCleanerExports();
   assert.equal(
     normalizeStructuredMarkdownForPaste([
@@ -364,7 +364,7 @@ test('copy cleaner inserts a blank line after markdown tables for Feishu renderi
   );
 });
 
-test('copy cleaner normalizes nested list indentation to four-space steps for Feishu rendering', () => {
+test('copy cleaner normalizes nested list indentation to four-space steps', () => {
   const { normalizeStructuredMarkdownForPaste } = loadCopyCleanerExports();
   assert.equal(
     normalizeStructuredMarkdownForPaste([
@@ -773,7 +773,7 @@ test('copy cleaner uses rendered code layout when chatgpt code DOM stores line b
   );
 });
 
-test('copy cleaner uses Feishu-friendly indentation for nested ordered lists', () => {
+test('copy cleaner uses four-space indentation for nested ordered lists', () => {
   const { serializeStructuredFragment } = loadCopyCleanerExports();
   const fragment = createFragment([
     createElement('OL', [

@@ -1,17 +1,17 @@
 #!/usr/bin/env node
 
 const { spawn } = require('child_process');
-const { resolve } = require('path');
 
 const {
   DEFAULT_CDP_ENDPOINT,
   connectToChromeOverCDP,
   syncUserscriptInBrowser,
 } = require('../lib/tampermonkey-cdp-utils.cjs');
-const { parseCliArgs } = require('./copy-cleaner-runner.js');
-
-const DEFAULT_SITES = ['chatgpt', 'gemini', 'tika', 'aistudio'];
-const DEFAULT_SCRIPT_PATH = resolve(__dirname, '../userscripts/copy-cleaner.user.js');
+const { parseCliArgs } = require('../lib/cli-args.cjs');
+const {
+  DEFAULT_SCRIPT_PATH,
+  DEFAULT_SITES,
+} = require('./copy-cleaner-config.cjs');
 const RUNNER_ENTRY = require.resolve('./copy-cleaner-runner.js');
 
 function resolveSites(args) {

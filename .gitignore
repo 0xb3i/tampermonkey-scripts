@@ -3,5 +3,3 @@ node_modules/
 .DS_Store
 test-results/
 playwright-report/
-package-lock.json
-FEISHU.md
