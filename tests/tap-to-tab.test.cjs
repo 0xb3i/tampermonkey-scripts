@@ -178,9 +178,9 @@ function createRuntime() {
   };
 }
 
-test('tap to tab metadata exposes the long-press release as version 0.2.0', () => {
+test('tap to tab metadata exposes the trackpad-tolerant release as version 0.3.0', () => {
   const source = fs.readFileSync(SCRIPT_PATH, 'utf8');
-  assert.match(source, /^\/\/ @version\s+0\.2\.0$/m);
+  assert.match(source, /^\/\/ @version\s+0\.3\.0$/m);
   assert.match(source, /without delaying regular clicks/);
   assert.doesNotMatch(source, /dblclick|doubleClickDelayMs/);
 });
@@ -234,38 +234,72 @@ test('elapsed hold time works even when the arming timer has not run', () => {
   assert.equal(runtime.openedTabs.length, 1);
 });
 
-test('movement and cancellation preserve the native link behavior', () => {
+test('small trackpad movement is tolerated while deliberate movement cancels', () => {
   const runtime = createRuntime();
   const anchor = new runtime.FakeAnchor('https://example.com/next');
 
   runtime.setTime(0);
   runtime.dispatch('document', 'pointerdown', { target: anchor });
-  runtime.dispatch('document', 'pointermove', { target: anchor, clientX: 9 });
+  runtime.dispatch('document', 'pointermove', { target: anchor, clientX: 12 });
+  runtime.setTime(310);
+  const toleratedUp = runtime.dispatch('document', 'pointerup', { target: anchor, clientX: 12 });
+
   runtime.setTime(500);
-  const movedUp = runtime.dispatch('document', 'pointerup', { target: anchor });
-
-  runtime.setTime(600);
   runtime.dispatch('document', 'pointerdown', { target: anchor, pointerId: 2 });
-  runtime.dispatch('document', 'pointercancel', { target: anchor, pointerId: 2 });
-  runtime.setTime(1000);
-  const cancelledUp = runtime.dispatch('document', 'pointerup', { target: anchor, pointerId: 2 });
+  runtime.dispatch('document', 'pointermove', { target: anchor, pointerId: 2, clientX: 17 });
+  runtime.setTime(900);
+  const movedUp = runtime.dispatch('document', 'pointerup', { target: anchor, pointerId: 2, clientX: 17 });
 
+  assert.equal(toleratedUp.defaultPrevented, true);
   assert.equal(movedUp.defaultPrevented, false);
-  assert.equal(cancelledUp.defaultPrevented, false);
-  assert.deepEqual(runtime.openedTabs, []);
+  assert.equal(runtime.openedTabs.length, 1);
 });
 
-test('long-press feedback arms at 350ms and is cleared after release', () => {
+test('long-press feedback arms at 300ms and is cleared after release', () => {
   const runtime = createRuntime();
   const anchor = new runtime.FakeAnchor('https://example.com/next');
 
   runtime.dispatch('document', 'pointerdown', { target: anchor });
-  runtime.runTimers(350);
+  assert.equal(anchor.hasAttribute('data-tap-to-tab-pressing'), true);
+  runtime.runTimers(300);
   assert.equal(anchor.hasAttribute('data-tap-to-tab-ready'), true);
 
-  runtime.setTime(350);
+  runtime.setTime(300);
   runtime.dispatch('document', 'pointerup', { target: anchor });
+  assert.equal(anchor.hasAttribute('data-tap-to-tab-pressing'), false);
   assert.equal(anchor.hasAttribute('data-tap-to-tab-ready'), false);
+});
+
+test('accidental drag and force-click lookup do not cancel a stationary hold', () => {
+  const runtime = createRuntime();
+  const anchor = new runtime.FakeAnchor('https://example.com/next');
+
+  runtime.setTime(0);
+  runtime.dispatch('document', 'pointerdown', { target: anchor });
+  runtime.dispatch('document', 'pointermove', { target: anchor, clientX: 8 });
+  const drag = runtime.dispatch('document', 'dragstart', { target: anchor, clientX: 8 });
+  const force = runtime.dispatch('document', 'webkitmouseforcewillbegin', { target: anchor });
+  runtime.setTime(310);
+  runtime.dispatch('document', 'pointerup', { target: anchor, clientX: 8 });
+
+  assert.equal(drag.defaultPrevented, true);
+  assert.equal(force.defaultPrevented, true);
+  assert.equal(runtime.openedTabs.length, 1);
+});
+
+test('pointer cancellation after the hold threshold still opens the link', () => {
+  const runtime = createRuntime();
+  const anchor = new runtime.FakeAnchor('https://example.com/next');
+
+  runtime.setTime(0);
+  runtime.dispatch('document', 'pointerdown', { target: anchor });
+  runtime.setTime(310);
+  runtime.dispatch('document', 'pointercancel', {
+    target: anchor,
+    cancelable: true,
+  });
+
+  assert.equal(runtime.openedTabs.length, 1);
 });
 
 test('unsupported pointer and link variants are ignored', () => {

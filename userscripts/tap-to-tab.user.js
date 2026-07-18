@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Tap To Tab
 // @namespace    https://local.userscripts.niubei/
-// @version      0.2.0
+// @version      0.3.0
 // @description  Hold a normal link to open it in a new tab without delaying regular clicks.
 // @author       Codex
 // @match        http://*/*
@@ -14,8 +14,8 @@
   'use strict';
 
   const CONFIG = {
-    holdDelayMs: 350,
-    movementTolerancePx: 8,
+    holdDelayMs: 300,
+    movementTolerancePx: 16,
     openInBackground: false,
     excludedHostPatterns: [
       // '*.example.com',
@@ -24,6 +24,7 @@
   };
 
   const NAVIGABLE_PROTOCOLS = new Set(['http:', 'https:']);
+  const PRESSING_ATTRIBUTE = 'data-tap-to-tab-pressing';
   const READY_ATTRIBUTE = 'data-tap-to-tab-ready';
   const FEEDBACK_STYLE_ID = 'tap-to-tab-feedback-style';
 
@@ -40,8 +41,9 @@
   document.addEventListener('pointerdown', handlePointerDown, true);
   document.addEventListener('pointermove', handlePointerMove, true);
   document.addEventListener('pointerup', handlePointerUp, true);
-  document.addEventListener('pointercancel', cancelActivePress, true);
-  document.addEventListener('dragstart', cancelActivePress, true);
+  document.addEventListener('pointercancel', handlePointerCancel, true);
+  document.addEventListener('dragstart', handleDragStart, true);
+  document.addEventListener('webkitmouseforcewillbegin', handleForcePress, true);
   window.addEventListener('click', handleGuardedClick, true);
   window.addEventListener('blur', cancelActivePress, true);
   document.addEventListener('visibilitychange', handleVisibilityChange, true);
@@ -63,6 +65,10 @@
     const style = document.createElement('style');
     style.id = FEEDBACK_STYLE_ID;
     style.textContent = [
+      `[${PRESSING_ATTRIBUTE}] {`,
+      '  -webkit-user-select: none !important;',
+      '  user-select: none !important;',
+      '}',
       `[${READY_ATTRIBUTE}] {`,
       '  outline: 2px solid #1677ff !important;',
       '  outline-offset: 2px !important;',
@@ -92,6 +98,7 @@
       startedAt: now(),
       startX: event.clientX,
       startY: event.clientY,
+      maxDistanceSquared: 0,
       armed: false,
       timerId: null,
     };
@@ -106,6 +113,7 @@
     }, CONFIG.holdDelayMs);
 
     activePress = press;
+    press.anchor.setAttribute(PRESSING_ATTRIBUTE, '');
     log('pressing', url.href);
   }
 
@@ -116,10 +124,36 @@
 
     const deltaX = event.clientX - activePress.startX;
     const deltaY = event.clientY - activePress.startY;
+    const distanceSquared = (deltaX * deltaX) + (deltaY * deltaY);
     const toleranceSquared = CONFIG.movementTolerancePx * CONFIG.movementTolerancePx;
-    if ((deltaX * deltaX) + (deltaY * deltaY) > toleranceSquared) {
+    activePress.maxDistanceSquared = Math.max(activePress.maxDistanceSquared, distanceSquared);
+    if (activePress.maxDistanceSquared > toleranceSquared) {
       cancelActivePress('pointer-moved');
     }
+  }
+
+  function handleDragStart(event) {
+    if (!activePress || findAnchor(event) !== activePress.anchor) {
+      return;
+    }
+
+    const toleranceSquared = CONFIG.movementTolerancePx * CONFIG.movementTolerancePx;
+    if (activePress.maxDistanceSquared <= toleranceSquared) {
+      event.preventDefault();
+      log('suppressed accidental drag', activePress.url.href);
+      return;
+    }
+
+    cancelActivePress('drag-started');
+  }
+
+  function handleForcePress(event) {
+    if (!activePress || findAnchor(event) !== activePress.anchor) {
+      return;
+    }
+
+    event.preventDefault();
+    log('suppressed force click lookup', activePress.url.href);
   }
 
   function handlePointerUp(event) {
@@ -144,6 +178,28 @@
 
     guardNextClick(press.anchor);
     event.preventDefault();
+    openUrlInNewTab(press.url);
+  }
+
+  function handlePointerCancel(event) {
+    if (!isActivePointer(event)) {
+      return;
+    }
+
+    const press = activePress;
+    const heldLongEnough = press.armed || now() - press.startedAt >= CONFIG.holdDelayMs;
+    const shouldOpen = heldLongEnough && press.anchor.isConnected;
+    clearActivePress();
+
+    if (!shouldOpen) {
+      log('cancelled', 'pointer-cancelled', press.url.href);
+      return;
+    }
+
+    guardNextClick(press.anchor);
+    if (event.cancelable) {
+      event.preventDefault();
+    }
     openUrlInNewTab(press.url);
   }
 
@@ -182,6 +238,7 @@
     activePress = null;
     window.clearTimeout(press.timerId);
     if (press.anchor && press.anchor.removeAttribute) {
+      press.anchor.removeAttribute(PRESSING_ATTRIBUTE);
       press.anchor.removeAttribute(READY_ATTRIBUTE);
     }
     return press;
