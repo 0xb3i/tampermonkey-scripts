@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Tap To Tab
 // @namespace    https://local.userscripts.niubei/
-// @version      0.3.0
+// @version      0.3.1
 // @description  Hold a normal link to open it in a new tab without delaying regular clicks.
 // @author       Codex
 // @match        http://*/*
@@ -15,7 +15,7 @@
 
   const CONFIG = {
     holdDelayMs: 300,
-    movementTolerancePx: 16,
+    movementTolerancePx: 32,
     openInBackground: false,
     excludedHostPatterns: [
       // '*.example.com',

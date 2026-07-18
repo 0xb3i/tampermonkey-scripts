@@ -178,9 +178,9 @@ function createRuntime() {
   };
 }
 
-test('tap to tab metadata exposes the trackpad-tolerant release as version 0.3.0', () => {
+test('tap to tab metadata exposes the trackpad-tolerant release as version 0.3.1', () => {
   const source = fs.readFileSync(SCRIPT_PATH, 'utf8');
-  assert.match(source, /^\/\/ @version\s+0\.3\.0$/m);
+  assert.match(source, /^\/\/ @version\s+0\.3\.1$/m);
   assert.match(source, /without delaying regular clicks/);
   assert.doesNotMatch(source, /dblclick|doubleClickDelayMs/);
 });
@@ -240,15 +240,15 @@ test('small trackpad movement is tolerated while deliberate movement cancels', (
 
   runtime.setTime(0);
   runtime.dispatch('document', 'pointerdown', { target: anchor });
-  runtime.dispatch('document', 'pointermove', { target: anchor, clientX: 12 });
+  runtime.dispatch('document', 'pointermove', { target: anchor, clientX: 31 });
   runtime.setTime(310);
-  const toleratedUp = runtime.dispatch('document', 'pointerup', { target: anchor, clientX: 12 });
+  const toleratedUp = runtime.dispatch('document', 'pointerup', { target: anchor, clientX: 31 });
 
   runtime.setTime(500);
   runtime.dispatch('document', 'pointerdown', { target: anchor, pointerId: 2 });
-  runtime.dispatch('document', 'pointermove', { target: anchor, pointerId: 2, clientX: 17 });
+  runtime.dispatch('document', 'pointermove', { target: anchor, pointerId: 2, clientX: 33 });
   runtime.setTime(900);
-  const movedUp = runtime.dispatch('document', 'pointerup', { target: anchor, pointerId: 2, clientX: 17 });
+  const movedUp = runtime.dispatch('document', 'pointerup', { target: anchor, pointerId: 2, clientX: 33 });
 
   assert.equal(toleratedUp.defaultPrevented, true);
   assert.equal(movedUp.defaultPrevented, false);

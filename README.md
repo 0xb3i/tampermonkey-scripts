@@ -5,7 +5,7 @@
 | 脚本 | 版本 | 作用 |
 | --- | --- | --- |
 | [复制净化器](userscripts/copy-cleaner.user.js) | 5.2.0 | 清理复制内容中的格式噪音，将网页公式和结构化内容转换成稳定 Markdown |
-| [Tap To Tab](userscripts/tap-to-tab.user.js) | 0.3.0 | 短按链接正常跳转，按住链接后松开可在新标签页打开 |
+| [Tap To Tab](userscripts/tap-to-tab.user.js) | 0.3.1 | 短按链接正常跳转，按住链接后松开可在新标签页打开 |
 
 ## 脚本说明
 
@@ -22,7 +22,7 @@
 
 - 普通短按不被拦截，保持网页原生跳转速度。
 - 鼠标左键按住普通链接约 300ms，出现蓝色轮廓后松开，即在新标签页打开。
-- 移动超过 16px 才会取消长按，小幅触控板漂移和误触发的拖拽不会中断识别。
+- 移动超过 32px 才会取消长按，触控板漂移和误触发的拖拽不会中断识别。
 - 修饰键点击、下载链接、非 `_self` 链接、页内锚点和编辑区域保持原行为。
 
 安装：将 [userscripts/tap-to-tab.user.js](userscripts/tap-to-tab.user.js) 导入 Tampermonkey。
