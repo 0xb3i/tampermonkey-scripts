@@ -137,7 +137,6 @@ function createRuntime() {
       pointerId: 1,
       pointerType: 'mouse',
       isPrimary: true,
-      buttons: 1,
       clientX: 0,
       clientY: 0,
       metaKey: false,
@@ -171,7 +170,6 @@ function createRuntime() {
 
   return {
     FakeAnchor,
-    FakeElement,
     dispatch,
     openedTabs,
     runTimers,
@@ -180,13 +178,13 @@ function createRuntime() {
   };
 }
 
-test('tap to tab metadata exposes the locked mouse-hold release as version 0.4.0', () => {
+test('tap to tab metadata exposes phase-specific movement tolerance as version 0.4.1', () => {
   const source = fs.readFileSync(SCRIPT_PATH, 'utf8');
-  assert.match(source, /^\/\/ @version\s+0\.4\.0$/m);
+  assert.match(source, /^\/\/ @version\s+0\.4\.1$/m);
   assert.match(source, /without delaying regular clicks/);
   assert.match(source, /window\.addEventListener\('blur', cancelActivePress\);/);
   assert.doesNotMatch(source, /window\.addEventListener\('blur', cancelActivePress, true\)/);
-  assert.doesNotMatch(source, /dblclick|doubleClickDelayMs|pointercancel/);
+  assert.doesNotMatch(source, /dblclick|doubleClickDelayMs/);
 });
 
 test('short press keeps the native click path untouched', () => {
@@ -194,9 +192,9 @@ test('short press keeps the native click path untouched', () => {
   const anchor = new runtime.FakeAnchor('https://example.com/next');
 
   runtime.setTime(0);
-  const down = runtime.dispatch('document', 'mousedown', { target: anchor });
+  const down = runtime.dispatch('document', 'pointerdown', { target: anchor });
   runtime.setTime(120);
-  const up = runtime.dispatch('window', 'mouseup', { target: anchor, buttons: 0 });
+  const up = runtime.dispatch('document', 'pointerup', { target: anchor });
   const click = runtime.dispatch('window', 'click', { target: anchor });
 
   assert.equal(down.defaultPrevented, false);
@@ -205,18 +203,16 @@ test('short press keeps the native click path untouched', () => {
   assert.deepEqual(runtime.openedTabs, []);
 });
 
-test('long press opens the mouse-down URL after release outside the original link', () => {
+test('long press opens the pointer-down URL once and suppresses the following click', () => {
   const runtime = createRuntime();
   const anchor = new runtime.FakeAnchor('https://example.com/original');
-  const outside = new runtime.FakeElement();
 
   runtime.setTime(0);
-  runtime.dispatch('document', 'mousedown', { target: anchor });
+  runtime.dispatch('document', 'pointerdown', { target: anchor });
   anchor.href = 'https://example.com/changed';
-  anchor.isConnected = false;
   runtime.setTime(400);
-  const up = runtime.dispatch('window', 'mouseup', { target: outside, buttons: 0 });
-  const click = runtime.dispatch('window', 'click', { target: outside, buttons: 0 });
+  const up = runtime.dispatch('document', 'pointerup', { target: anchor });
+  const click = runtime.dispatch('window', 'click', { target: anchor });
 
   assert.equal(up.defaultPrevented, true);
   assert.equal(click.defaultPrevented, true);
@@ -233,31 +229,43 @@ test('elapsed hold time works even when the arming timer has not run', () => {
   const anchor = new runtime.FakeAnchor('https://example.com/next');
 
   runtime.setTime(10);
-  runtime.dispatch('document', 'mousedown', { target: anchor });
+  runtime.dispatch('document', 'pointerdown', { target: anchor });
   runtime.setTime(370);
-  runtime.dispatch('window', 'mouseup', { target: anchor, buttons: 0 });
+  runtime.dispatch('document', 'pointerup', { target: anchor });
 
   assert.equal(runtime.openedTabs.length, 1);
 });
 
-test('pre-arm movement uses a generous radius while larger movement cancels', () => {
+test('pre-arm jitter is lenient while post-arm movement still cancels', () => {
   const runtime = createRuntime();
   const anchor = new runtime.FakeAnchor('https://example.com/next');
 
   runtime.setTime(0);
-  runtime.dispatch('document', 'mousedown', { target: anchor });
-  runtime.dispatch('document', 'mousemove', { target: anchor, clientX: 47 });
+  runtime.dispatch('document', 'pointerdown', { target: anchor });
+  runtime.dispatch('document', 'pointermove', { target: anchor, clientX: 95 });
+  runtime.runTimers(300);
+  assert.equal(anchor.hasAttribute('data-tap-to-tab-ready'), true);
+  runtime.dispatch('document', 'pointermove', { target: anchor, clientX: 126 });
   runtime.setTime(310);
-  const toleratedUp = runtime.dispatch('window', 'mouseup', { target: anchor, clientX: 47, buttons: 0 });
+  const toleratedUp = runtime.dispatch('document', 'pointerup', { target: anchor, clientX: 126 });
 
   runtime.setTime(500);
-  runtime.dispatch('document', 'mousedown', { target: anchor });
-  runtime.dispatch('document', 'mousemove', { target: anchor, clientX: 49 });
+  runtime.dispatch('document', 'pointerdown', { target: anchor, pointerId: 2 });
+  runtime.dispatch('document', 'pointermove', { target: anchor, pointerId: 2, clientX: 97 });
+  runtime.runTimers(300);
   runtime.setTime(900);
-  const movedUp = runtime.dispatch('window', 'mouseup', { target: anchor, clientX: 49, buttons: 0 });
+  const preArmCancelledUp = runtime.dispatch('document', 'pointerup', { target: anchor, pointerId: 2, clientX: 97 });
+
+  runtime.setTime(1000);
+  runtime.dispatch('document', 'pointerdown', { target: anchor, pointerId: 3, clientX: 10 });
+  runtime.runTimers(300);
+  runtime.dispatch('document', 'pointermove', { target: anchor, pointerId: 3, clientX: 43 });
+  runtime.setTime(1400);
+  const postArmCancelledUp = runtime.dispatch('document', 'pointerup', { target: anchor, pointerId: 3, clientX: 43 });
 
   assert.equal(toleratedUp.defaultPrevented, true);
-  assert.equal(movedUp.defaultPrevented, false);
+  assert.equal(preArmCancelledUp.defaultPrevented, false);
+  assert.equal(postArmCancelledUp.defaultPrevented, false);
   assert.equal(runtime.openedTabs.length, 1);
 });
 
@@ -265,13 +273,13 @@ test('long-press feedback arms at 300ms and is cleared after release', () => {
   const runtime = createRuntime();
   const anchor = new runtime.FakeAnchor('https://example.com/next');
 
-  runtime.dispatch('document', 'mousedown', { target: anchor });
+  runtime.dispatch('document', 'pointerdown', { target: anchor });
   assert.equal(anchor.hasAttribute('data-tap-to-tab-pressing'), true);
   runtime.runTimers(300);
   assert.equal(anchor.hasAttribute('data-tap-to-tab-ready'), true);
 
   runtime.setTime(300);
-  runtime.dispatch('window', 'mouseup', { target: anchor, buttons: 0 });
+  runtime.dispatch('document', 'pointerup', { target: anchor });
   assert.equal(anchor.hasAttribute('data-tap-to-tab-pressing'), false);
   assert.equal(anchor.hasAttribute('data-tap-to-tab-ready'), false);
 });
@@ -281,30 +289,29 @@ test('accidental drag and force-click lookup do not cancel a stationary hold', (
   const anchor = new runtime.FakeAnchor('https://example.com/next');
 
   runtime.setTime(0);
-  runtime.dispatch('document', 'mousedown', { target: anchor });
-  runtime.dispatch('document', 'mousemove', { target: anchor, clientX: 8 });
+  runtime.dispatch('document', 'pointerdown', { target: anchor });
+  runtime.dispatch('document', 'pointermove', { target: anchor, clientX: 8 });
   const drag = runtime.dispatch('document', 'dragstart', { target: anchor, clientX: 8 });
   const force = runtime.dispatch('document', 'webkitmouseforcewillbegin', { target: anchor });
   runtime.setTime(310);
-  runtime.dispatch('window', 'mouseup', { target: anchor, clientX: 8, buttons: 0 });
+  runtime.dispatch('document', 'pointerup', { target: anchor, clientX: 8 });
 
   assert.equal(drag.defaultPrevented, true);
   assert.equal(force.defaultPrevented, true);
   assert.equal(runtime.openedTabs.length, 1);
 });
 
-test('armed state survives large movement and a disconnected anchor', () => {
+test('pointer cancellation after the hold threshold still opens the link', () => {
   const runtime = createRuntime();
   const anchor = new runtime.FakeAnchor('https://example.com/next');
-  const outside = new runtime.FakeElement();
 
   runtime.setTime(0);
-  runtime.dispatch('document', 'mousedown', { target: anchor });
-  runtime.runTimers(300);
-  anchor.isConnected = false;
-  runtime.dispatch('document', 'mousemove', { target: outside, clientX: 300 });
-  runtime.setTime(500);
-  runtime.dispatch('window', 'mouseup', { target: outside, clientX: 300, buttons: 0 });
+  runtime.dispatch('document', 'pointerdown', { target: anchor });
+  runtime.setTime(310);
+  runtime.dispatch('document', 'pointercancel', {
+    target: anchor,
+    cancelable: true,
+  });
 
   assert.equal(runtime.openedTabs.length, 1);
 });
@@ -323,9 +330,9 @@ test('unsupported pointer and link variants are ignored', () => {
     { anchor: modified, event: { target: modified, pointerType: 'touch' } },
   ].forEach(function (entry, index) {
     runtime.setTime(index * 1000);
-    runtime.dispatch('document', 'mousedown', entry.event);
+    runtime.dispatch('document', 'pointerdown', entry.event);
     runtime.setTime((index * 1000) + 500);
-    runtime.dispatch('window', 'mouseup', Object.assign({ buttons: 0 }, entry.event));
+    runtime.dispatch('document', 'pointerup', entry.event);
   });
 
   assert.deepEqual(runtime.openedTabs, []);
