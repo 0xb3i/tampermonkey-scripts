@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="./assets/readme/hero.svg" width="100%" alt="Tampermonkey Scripts — Tap To Tab：短按链接原生跳转，长按 300ms 出现蓝框后在新标签页打开">
+  <img src="./assets/readme/hero.svg" width="100%" alt="Tampermonkey Scripts：Tap To Tab 短按照常跳转，按住 300ms 再松开在新标签页打开">
 </p>
 
 <p align="center">

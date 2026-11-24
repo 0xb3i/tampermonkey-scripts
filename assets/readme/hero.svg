@@ -1,76 +1,28 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="340" viewBox="0 0 1200 340" role="img" aria-labelledby="title desc">
-  <title id="title">Tampermonkey Scripts — Tap To Tab</title>
-  <desc id="desc">Tap To Tab userscript hero showing short-press native navigation versus 300ms long-press blue outline to open in a new tab.</desc>
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="320" viewBox="0 0 1200 320" role="img" aria-labelledby="title desc">
+  <title id="title">Tampermonkey Scripts</title>
+  <desc id="desc">Tampermonkey Scripts，收录 Tap To Tab：短按链接照常跳转，按住 300ms 再松开则在新标签页打开。右侧以时间轴示意两种松开结果。</desc>
 
-  <defs>
-    <linearGradient id="bg-grad" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0%" stop-color="#0F1419"/>
-      <stop offset="100%" stop-color="#141C26"/>
-    </linearGradient>
-    <linearGradient id="accent-bar" x1="0" y1="0" x2="1" y2="0">
-      <stop offset="0%" stop-color="#3B82F6"/>
-      <stop offset="100%" stop-color="#60A5FA"/>
-    </linearGradient>
-  </defs>
+  <rect width="1200" height="320" rx="24" fill="#18181B"/>
 
-  <rect width="1200" height="340" rx="24" fill="url(#bg-grad)"/>
-  <rect x="0.5" y="0.5" width="1199" height="339" rx="23.5" fill="none" stroke="#263241"/>
-
-  <!-- Left Title Block -->
-  <g transform="translate(56 54)">
-    <rect x="0" y="0" width="286" height="32" rx="16" fill="#182230" stroke="#2D3E52"/>
-    <circle cx="18" cy="16" r="5" fill="#3B82F6"/>
-    <text x="32" y="21" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="14" font-weight="600" fill="#93C5FD" letter-spacing="0.4">TAMPERMONKEY · v0.4.1</text>
-
-    <text x="0" y="92" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', sans-serif" font-size="52" font-weight="750" fill="#F8FAFC" letter-spacing="-0.8">Tampermonkey Scripts</text>
-    <text x="0" y="136" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', sans-serif" font-size="22" font-weight="500" fill="#CBD5E1">短按链接原生跳转，长按 300ms 出现蓝框后松开，</text>
-    <text x="0" y="168" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', sans-serif" font-size="22" font-weight="500" fill="#CBD5E1">在后台新标签页打开 — 专为触控板防抖优化。</text>
-
-    <g transform="translate(0 202)">
-      <rect x="0" y="0" width="136" height="34" rx="8" fill="#182230" stroke="#2A384A"/>
-      <text x="16" y="22" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="16" fill="#E2E8F0">Hold 300ms</text>
-
-      <rect x="150" y="0" width="166" height="34" rx="8" fill="#182230" stroke="#2A384A"/>
-      <text x="166" y="22" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="16" fill="#E2E8F0">Drift 96px / 32px</text>
-
-      <rect x="330" y="0" width="134" height="34" rx="8" fill="#182230" stroke="#2A384A"/>
-      <text x="346" y="22" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="16" fill="#93C5FD">Node 20+ Test</text>
-    </g>
+  <g id="title-block" font-family="-apple-system, BlinkMacSystemFont, 'SF Pro Display', 'PingFang SC', 'Segoe UI', sans-serif">
+    <text x="72" y="150" font-size="56" font-weight="700" letter-spacing="-1.5" fill="#F4F4F5">Tampermonkey Scripts</text>
+    <text x="74" y="204" font-size="26" fill="#A1A1AA"><tspan fill="#F4F4F5" font-weight="600">Tap To Tab</tspan>：短按照常跳转，</text>
+    <text x="74" y="242" font-size="26" fill="#A1A1AA">按住 300ms 再松开，在新标签页打开</text>
   </g>
 
-  <!-- Right Proof Panel: Short Press vs Long Press -->
-  <g transform="translate(680 42)">
-    <rect x="0" y="0" width="464" height="256" rx="18" fill="#131B24" stroke="#263241"/>
-
-    <!-- Browser top bar -->
-    <rect x="0" y="0" width="464" height="38" rx="18" fill="#1A2431"/>
-    <rect x="0" y="20" width="464" height="18" fill="#1A2431"/>
-    <circle cx="22" cy="19" r="5" fill="#475569"/>
-    <circle cx="40" cy="19" r="5" fill="#475569"/>
-    <circle cx="58" cy="19" r="5" fill="#475569"/>
-    <rect x="86" y="9" width="170" height="20" rx="6" fill="#0F1419"/>
-    <text x="98" y="23" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="12" fill="#94A3B8">tap-to-tab.user.js</text>
-
-    <!-- Tab 2 indicator -->
-    <rect x="266" y="7" width="138" height="24" rx="7" fill="#1E3A5F" stroke="#3B82F6" stroke-width="1.5"/>
-    <text x="280" y="23" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', sans-serif" font-size="13" font-weight="600" fill="#BFDBFE">+ 新标签页打开</text>
-
-    <!-- Case 1: Short press -->
-    <g transform="translate(24 58)">
-      <rect x="0" y="0" width="416" height="74" rx="12" fill="#0F1419" stroke="#232F3E"/>
-      <text x="18" y="28" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="15" font-weight="600" fill="#94A3B8">SHORT PRESS &lt; 300ms</text>
-      <text x="18" y="54" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', sans-serif" font-size="18" fill="#E2E8F0">普通点击不被拦截 · 保持原生跳转</text>
-      <rect x="334" y="18" width="66" height="36" rx="8" fill="#1E293B"/>
-      <text x="348" y="42" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="15" fill="#CBD5E1">_self</text>
+  <g id="hold-timeline" font-family="-apple-system, BlinkMacSystemFont, 'PingFang SC', 'Segoe UI', sans-serif">
+    <g id="link">
+      <rect x="752" y="80" width="200" height="50" rx="8" fill="none" stroke="#F59E0B" stroke-width="2"/>
+      <text x="772" y="113" font-size="22" fill="#F4F4F5" text-decoration="underline">稍后再读的文章</text>
+      <path d="M918 116 L918 146 L925 139 L930 151 L936 149 L931 137 L941 137 Z" fill="#F4F4F5" stroke="#18181B" stroke-width="1.5" stroke-linejoin="round"/>
     </g>
-
-    <!-- Case 2: Long press armed -->
-    <g transform="translate(24 148)">
-      <rect x="0" y="0" width="416" height="84" rx="12" fill="#111C2D" stroke="#3B82F6" stroke-width="2.5"/>
-      <text x="18" y="29" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="15" font-weight="700" fill="#60A5FA">HOLD ≥ 300ms · 蓝框激活</text>
-      <text x="18" y="59" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', sans-serif" font-size="19" font-weight="600" fill="#F8FAFC">松开鼠标左键 → 在新标签页打开链接</text>
-      <rect x="364" y="22" width="36" height="36" rx="8" fill="#1D4ED8"/>
-      <path d="M376 46 L388 34 M379 34 L388 34 L388 43" stroke="#FFFFFF" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+    <g id="axis">
+      <path d="M760 196 H912" stroke="#52525B" stroke-width="6" stroke-linecap="round"/>
+      <path d="M912 196 H1120" stroke="#F59E0B" stroke-width="6" stroke-linecap="round"/>
+      <circle cx="912" cy="196" r="9" fill="#18181B" stroke="#F59E0B" stroke-width="3"/>
+      <text x="912" y="176" font-size="18" fill="#F59E0B" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace">300ms</text>
+      <text x="760" y="236" font-size="20" fill="#A1A1AA">短按 · 原页跳转</text>
+      <text x="1120" y="236" font-size="20" fill="#F4F4F5" text-anchor="end">按住 · 新标签页</text>
     </g>
   </g>
 </svg>
