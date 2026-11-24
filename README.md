@@ -1,40 +1,45 @@
-# Tampermonkey Scripts
+<p align="center">
+  <img src="./assets/readme/hero.svg" width="100%" alt="Tampermonkey Scripts — Tap To Tab：短按链接原生跳转，长按 300ms 出现蓝框后在新标签页打开">
+</p>
 
-当前维护的用户脚本：
+<p align="center">
+  <a href="userscripts/tap-to-tab.user.js">安装 Tap To Tab</a>&nbsp;&nbsp;·&nbsp;&nbsp;
+  <a href="#手势机制">手势机制</a>&nbsp;&nbsp;·&nbsp;&nbsp;
+  <a href="#开发与测试">开发与测试</a>&nbsp;&nbsp;·&nbsp;&nbsp;
+  <a href="#同步到-tampermonkey">同步到 Tampermonkey</a>
+</p>
+
+## 脚本列表
 
 | 脚本 | 版本 | 作用 |
 | --- | --- | --- |
-| [Tap To Tab](userscripts/tap-to-tab.user.js) | 0.4.1 | 短按链接正常跳转，按住链接后松开可在新标签页打开 |
+| [Tap To Tab](userscripts/tap-to-tab.user.js) | `0.4.1` | 短按链接正常跳转，按住链接 300ms 后松开在新标签页打开 |
 
-## 脚本说明
+## 手势机制
 
-### Tap To Tab
+<p align="center">
+  <img src="./assets/readme/gesture-flow.svg" width="100%" alt="Tap To Tab 两阶段容差状态机：按下计时 96px 容差、300ms 蓝框激活 32px 容差、松开在新标签页打开">
+</p>
 
-- 普通短按不被拦截，保持网页原生跳转速度。
-- 鼠标左键按住普通链接约 300ms，出现蓝色轮廓后松开，即在新标签页打开。
-- 蓝框出现前允许 96px 漂移，避免触控板抖动打断计时；蓝框出现后移动超过 32px 仍会取消。
-- 修饰键点击、下载链接、非 `_self` 链接、页内锚点和编辑区域保持原行为。
+- **短按零延迟**：普通短按不被拦截，保持网页原生跳转速度。
+- **两阶段触控板防抖**：蓝框出现前允许 `96px` 漂移，避免触控板轻微抖动打断计时；蓝框出现后移动超过 `32px` 仍可取消。
+- **边界保护**：修饰键点击、下载链接、非 `_self` 链接、页内锚点与可编辑区域保持原生行为。
 
-安装：将 [userscripts/tap-to-tab.user.js](userscripts/tap-to-tab.user.js) 导入 Tampermonkey。
+## 安装
 
-## 目录
+将 [userscripts/tap-to-tab.user.js](userscripts/tap-to-tab.user.js) 直接导入 Tampermonkey 即可使用。
 
-- `userscripts/`：可直接安装的用户脚本。
-- `tests/`：不依赖浏览器的 Node.js 单元与仓库契约测试。
+## 开发与测试
 
-## 开发与验证
-
-要求 Node.js 20 或更高版本。
+要求 Node.js 20 或更高版本。仓库测试为不依赖浏览器的纯 Node.js 单元测试与仓库契约测试：
 
 ```bash
 npm test
 ```
 
-## 同步与浏览器验证
+## 同步到 Tampermonkey
 
-仓库不再提供浏览器控制、脚本同步 CLI 或 Node API。需要更新 Tampermonkey 或验证真实网页时，在 Codex 中明确要求使用 **Chrome DevTools MCP** 操作当前 Chrome。
-
-推荐请求方式：
+仓库不再提供浏览器控制、脚本同步 CLI 或 Node API。需要更新 Tampermonkey 或验证真实网页时，通过 **Chrome DevTools MCP** 操作当前 Chrome：
 
 ```text
 使用 Chrome DevTools MCP，将 userscripts/tap-to-tab.user.js 更新到当前 Chrome 的 Tampermonkey，并校验版本、启用状态和源码哈希。
