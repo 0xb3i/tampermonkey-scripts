@@ -1,22 +1,12 @@
 # Tampermonkey Scripts
 
-当前维护两个可直接安装的用户脚本：
+当前维护的用户脚本：
 
 | 脚本 | 版本 | 作用 |
 | --- | --- | --- |
-| [复制净化器](userscripts/copy-cleaner.user.js) | 5.2.0 | 清理复制内容中的格式噪音，将网页公式和结构化内容转换成稳定 Markdown |
 | [Tap To Tab](userscripts/tap-to-tab.user.js) | 0.4.1 | 短按链接正常跳转，按住链接后松开可在新标签页打开 |
 
 ## 脚本说明
-
-### 复制净化器
-
-- 还原 KaTeX、MathJax 公式为 LaTeX。
-- 保留标题、列表、表格、引用、代码块、链接和图片等 Markdown 结构。
-- 统一行内公式间距、嵌套列表四空格缩进和表格后的空行。
-- 支持页面选区、Clipboard API，以及 ChatGPT、Gemini、AI Studio、Tika 的复制按钮。
-
-安装：将 [userscripts/copy-cleaner.user.js](userscripts/copy-cleaner.user.js) 导入 Tampermonkey。
 
 ### Tap To Tab
 
